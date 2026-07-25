@@ -30,7 +30,7 @@ Media Player via Home Assistant.
 | Peça | Tecnologia | Função |
 |------|------------|--------|
 | **Cérebro** | FastAPI + LangGraph + LangChain | Recebe texto, decide via grafo, aciona ferramentas, devolve resposta falável |
-| **Motor cognitivo** | Google Gemini (default) ou OpenAI-compatível | LLM trocável por configuração (ADR-0001) |
+| **Motor cognitivo** | Gemini, OpenAI-compatível ou Ollama local | LLM trocável por configuração (ADR-0001) |
 | **Satélite** | `faster-whisper` (CPU/int8) + `sounddevice` | STT 100% offline, push-to-talk |
 | **Integração Física** | Home Assistant REST + Alexa Media Player | Controle de dispositivos IoT e síntese de voz (TTS) |
 | **Ferramentas** | Open-Meteo, Tavily, Home Assistant | Clima, busca web, automação — expostas ao LLM via `@tool` |
@@ -115,7 +115,7 @@ microfone está.
 - `Settings(BaseSettings)`: leitura estrita do `.env` (`extra="forbid"`).
 - `get_settings()`: acesso com cache (`lru_cache`).
 - `CognitiveMotor` (Protocol): contrato do LLM, desacopla o grafo do backend.
-- `get_llm()`: factory — `gemini` ou `openai`, ambos com timeout.
+- `get_llm()`: factory — `gemini`, `openai` ou `ollama`, todos com timeout.
 
 ### `src/services/ha_client.py` — Home Assistant + Alexa
 - `HomeAssistantClient`: `httpx.AsyncClient` com `base_url`/auth/timeout das
@@ -429,9 +429,10 @@ Copie `.env.example` para `.env` e preencha. Resumo:
 
 | Variável | Descrição |
 |----------|-----------|
-| `LLM_PROVIDER` | `gemini` ou `openai` (ADR-0001) |
+| `LLM_PROVIDER` | `gemini`, `openai` ou `ollama` (ADR-0001) |
 | `GEMINI_API_KEY` | Chave do Google Gemini |
 | `OPENAI_API_KEY` / `OPENAI_API_BASE` | Backend OpenAI-compatível (use se `LLM_PROVIDER=openai`) |
+| `OLLAMA_BASE_URL` / `OLLAMA_MODEL` | Ollama local (padrão: `http://127.0.0.1:11434`, `llama3.2:3b`) |
 | `LLM_TIMEOUT_S` | Timeout do motor cognitivo (default `30.0`) |
 | `HA_URL` | URL base do Home Assistant |
 | `HA_TOKEN` | Token de longa duração com **permissão mínima** (apenas `call_service` para `notify.alexa_media`, `homeassistant` e `switch`/`light`) |

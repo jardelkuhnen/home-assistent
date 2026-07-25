@@ -30,6 +30,45 @@ async def test_send_to_brain_failure_raises(test_env: dict[str, str]) -> None:
             await send_to_brain("algo")
 
 
+@pytest.mark.asyncio
+async def test_send_to_brain_uses_brain_timeout_not_ha(test_env: dict[str, str]) -> None:
+    """O hop Satélite→Cérebro usa brain_timeout_s (maior), não ha_timeout_s."""
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+    s = get_settings()
+    assert s.brain_timeout_s > s.ha_timeout_s
+
+
+@pytest.mark.asyncio
+async def test_run_once_handles_timeout(
+    test_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """run_once não explode com traceback em timeout — mostra mensagem amigável."""
+    from satelite import run_once
+
+    async def fake_send_to_brain(text: str):  # noqa: ARG001
+        raise httpx.ReadTimeout("timed out")
+
+    def fake_capture_audio(*args: object, **kwargs: object) -> bytes:  # noqa: ARG001
+        return b"\x00" * 32
+
+    def fake_transcribe(audio, settings=None):  # noqa: ANN001, ARG001
+        return "comprar bicicleta"
+
+    # stdin readline não-bloqueante
+    import satelite
+
+    monkeypatch.setattr(satelite, "send_to_brain", fake_send_to_brain)
+    monkeypatch.setattr(satelite, "capture_audio", fake_capture_audio)
+    monkeypatch.setattr(satelite, "transcribe", fake_transcribe)
+    monkeypatch.setattr("sys.stdin", type("S", (), {"readline": lambda self: "\n"})())
+
+    await run_once()  # não deve levantar
+    out = capsys.readouterr().err
+    assert "timeout" in out.lower()
+
+
 def test_transcribe_returns_string(
     test_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

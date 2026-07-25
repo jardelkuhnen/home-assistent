@@ -4,7 +4,7 @@ Centraliza:
 * ``Settings`` — leitura estrita de variáveis de ambiente (``extra="forbid"``).
 * ``get_settings()`` — acesso com cache (``lru_cache``).
 * ``CognitiveMotor`` — Protocol que desacopla o grafo do LLM concreto (ADR-0001).
-* ``get_llm()`` — factory que devolve Gemini ou backend OpenAI-compatível.
+* ``get_llm()`` — factory que devolve Gemini, OpenAI ou Ollama local.
 """
 
 from __future__ import annotations
@@ -30,10 +30,12 @@ class Settings(BaseSettings):
     )
 
     # --- Motor cognitivo ---
-    llm_provider: Literal["gemini", "openai"]
-    gemini_api_key: SecretStr
-    openai_api_key: SecretStr
+    llm_provider: Literal["gemini", "openai", "ollama"]
+    gemini_api_key: SecretStr = SecretStr("")
+    openai_api_key: SecretStr = SecretStr("")
     openai_api_base: str = ""
+    ollama_base_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = "llama3.2:3b"
     llm_timeout_s: float = 30.0
 
     # --- Home Assistant / Alexa ---
@@ -50,6 +52,9 @@ class Settings(BaseSettings):
 
     # --- Satélite → Cérebro (fechado na Task 5.3) ---
     brain_url: AnyHttpUrl = AnyHttpUrl("http://localhost:8000")
+    # Um turno completo (LLM + tools + 2ª chamada + TTS) pode levar bem mais
+    # que o timeout do HA: timeout próprio, maior, para o hop Satélite→Cérebro.
+    brain_timeout_s: float = 90.0
 
     # --- STT (faster-whisper) ---
     whisper_model: str = "small"
@@ -82,7 +87,7 @@ def get_llm() -> CognitiveMotor:
     """Factory do motor cognitivo.
 
     Seleciona o backend por ``llm_provider`` e aplica timeout explícito em
-    ambos os caminhos (baseline de segurança item 2).
+    todos os caminhos (baseline de segurança item 2).
     """
     settings = get_settings()
 
@@ -93,6 +98,15 @@ def get_llm() -> CognitiveMotor:
             model="gemini-3.5-flash",
             google_api_key=settings.gemini_api_key.get_secret_value(),
             timeout=settings.llm_timeout_s,
+        )
+
+    if settings.llm_provider == "ollama":
+        from langchain_ollama import ChatOllama
+
+        return ChatOllama(
+            model=settings.ollama_model,
+            base_url=settings.ollama_base_url,
+            client_kwargs={"timeout": settings.llm_timeout_s},
         )
 
     from langchain_openai import ChatOpenAI

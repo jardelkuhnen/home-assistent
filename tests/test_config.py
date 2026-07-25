@@ -23,3 +23,14 @@ def test_settings_rejects_unknown_field(test_env: dict[str, str]) -> None:
     # (proteção contra typos em chaves de configuração).
     with pytest.raises(ValidationError):
         Settings(unknown_field="surpresa")
+
+
+def test_settings_supports_local_ollama(
+    test_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    settings = get_settings()
+
+    assert settings.llm_provider == "ollama"
+    assert settings.ollama_base_url == "http://127.0.0.1:11434"
+    assert settings.ollama_model == "llama3.2:3b"

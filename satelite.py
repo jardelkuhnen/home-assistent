@@ -60,7 +60,7 @@ async def send_to_brain(
         client = httpx.AsyncClient(
             base_url=str(s.brain_url),
             headers={"X-API-Key": s.brain_api_key.get_secret_value()},
-            timeout=s.ha_timeout_s,
+            timeout=s.brain_timeout_s,
         )
     try:
         response = await client.post("/chat", json={"text": text})
@@ -85,7 +85,17 @@ async def run_once() -> None:
         print("Nada transcrito.", file=sys.stderr)
         return
 
-    result = await send_to_brain(text)
+    try:
+        result = await send_to_brain(text)
+    except httpx.TimeoutException:
+        print(
+            "O Cérebro demorou demais para responder (timeout). Tente de novo.",
+            file=sys.stderr,
+        )
+        return
+    except httpx.HTTPError as exc:
+        print(f"Não consegui falar com o Cérebro: {exc}", file=sys.stderr)
+        return
     print(f"Cérebro: {result.get('reply')} (spoken={result.get('spoken')})", file=sys.stderr)
 
 

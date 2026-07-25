@@ -20,7 +20,7 @@ test:
 	pytest
 
 run-brain:
-	uvicorn api:app --reload --host 0.0.0.0 --port 8000
+	./.venv/bin/uvicorn api:app --reload --host 0.0.0.0 --port 8000 --log-level info
 
 run-satellite:
 	python satelite.py
