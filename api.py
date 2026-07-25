@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from src.config import Settings, get_settings
 from src.graph import build_graph
+from src.graph.nodes import content_to_text
 from src.services.ha_client import HomeAssistantClient
 
 
@@ -82,7 +83,7 @@ async def chat(
     reply = ""
     if messages:
         last = messages[-1]
-        reply = last.content if isinstance(last.content, str) else str(last.content)
+        reply = content_to_text(last.content)
 
     spoken = bool(result.get("spoken", False))
     error = result.get("error")

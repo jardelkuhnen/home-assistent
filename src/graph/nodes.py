@@ -19,6 +19,32 @@ from src.tools import ALL_TOOLS
 Node = Callable[[AgentState], Awaitable[dict[str, Any]]]
 
 
+def content_to_text(content: Any) -> str:
+    """Extrai texto limpo do ``content`` de uma mensagem do LLM.
+
+    O Gemini (via langchain-google-genai) devolve ``content`` como **lista de
+    blocos** ``[{"type": "text", "text": "...", "extras": {...}}]`` em vez de
+    string pura. Fazer ``str(content)`` serializa a lista inteira — incluindo
+    assinaturas criptográficas do Google — e esse lixo chega à Alexa.
+
+    Esta função desempacota só o campo ``text`` de cada bloco e junta com
+    espaço, devolvendo sempre uma string limpa e falável.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str) and text:
+                    parts.append(text)
+        return " ".join(parts).strip()
+    return str(content)
+
+
 async def chatbot_node(state: AgentState) -> dict[str, Any]:
     """Invoca o motor cognitivo com tools e system prompt injetados."""
     llm = get_llm()
@@ -63,7 +89,7 @@ def build_speak_node(
         text = ""
         if messages:
             last = messages[-1]
-            text = last.content if isinstance(last.content, str) else str(last.content)
+            text = content_to_text(last.content)
 
         if not text:
             return {"spoken": False, "error": "sem conteúdo para falar"}
@@ -79,6 +105,7 @@ def build_speak_node(
 
 __all__ = [
     "Node",
+    "content_to_text",
     "chatbot_node",
     "build_tool_node",
     "build_speak_node",

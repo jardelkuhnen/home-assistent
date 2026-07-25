@@ -90,7 +90,7 @@ def get_llm() -> CognitiveMotor:
         from langchain_google_genai import ChatGoogleGenerativeAI
 
         return ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
+            model="gemini-3.5-flash",
             google_api_key=settings.gemini_api_key.get_secret_value(),
             timeout=settings.llm_timeout_s,
         )

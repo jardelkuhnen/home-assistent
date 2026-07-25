@@ -56,3 +56,37 @@ def test_chat_valid_key_calls_graph(client: TestClient, monkeypatch: pytest.Monk
     body = response.json()
     assert body["reply"] == "tudo certo"
     assert body["spoken"] is True
+
+
+def test_chat_reply_unwraps_gemini_blocks(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """reply deve ser texto limpo mesmo quando o LLM devolve blocos (Gemini)."""
+    from langchain_core.messages import AIMessage
+
+    async def fake_ainvoke(payload: dict) -> dict:  # noqa: ARG001
+        return {
+            "messages": [
+                AIMessage(
+                    content=[
+                        {
+                            "type": "text",
+                            "text": "Não encontrei a população atual.",
+                            "extras": {"signature": "CqECA...sig..."},
+                        }
+                    ]
+                )
+            ],
+            "spoken": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr(client.app.state.graph, "ainvoke", fake_ainvoke)
+
+    response = client.post("/chat", json={"text": "população"}, headers={"X-API-Key": _API_KEY})
+    assert response.status_code == 200
+    body = response.json()
+    # Sem serialização de lista/dict/assinatura — texto puro.
+    assert body["reply"] == "Não encontrei a população atual."
+    assert "{" not in body["reply"]
+    assert "signature" not in body["reply"]
