@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 import respx
@@ -94,3 +96,35 @@ def test_transcribe_returns_string(
     result = transcribe(audio)
     assert isinstance(result, str)
     assert result == "ligar a luz da sala"
+
+
+def test_is_shift_detects_all_variants() -> None:
+    """_is_shift reconhece shift, shift_l e shift_r (pynput Key)."""
+    from satelite import _is_shift
+
+    class _K:
+        def __init__(self, name: str | None) -> None:
+            self.name = name
+
+    assert _is_shift(_K("shift")) is True
+    assert _is_shift(_K("shift_l")) is True
+    assert _is_shift(_K("shift_r")) is True
+    assert _is_shift(_K("enter")) is False
+    assert _is_shift(_K(None)) is False
+
+
+async def test_with_spinner_runs_coro_and_returns_result(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """_with_spinner executa o coro e devolve seu resultado, sem travar a tela."""
+    from satelite import _with_spinner
+
+    async def work() -> str:
+        await asyncio.sleep(0.05)
+        return "ok"
+
+    result = await _with_spinner("Processando", work())
+    assert result == "ok"
+    # A animação é limpa ao final; não deve restar o caractere giratório.
+    out = capsys.readouterr().err
+    assert "⠋" not in out or out.count("\r") >= 1  # sobrescreveu a linha

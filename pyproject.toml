@@ -24,6 +24,7 @@ dependencies = [
     "faster-whisper",
     "sounddevice",
     "numpy",
+    "pynput",
 ]
 
 [project.optional-dependencies]
