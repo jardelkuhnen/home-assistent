@@ -1,0 +1,38 @@
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# --- Virtualenvs ---
+.venv/
+venv/
+env/
+
+# --- Tooling caches ---
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.cache/
+
+# --- Faster-Whisper / modelos Whisper baixados ---
+# Modelos são cacheados localmente pelo faster-whisper (~/.cache/huggingface
+# por padrão), mas mantemos cobertura para caches dentro do repositório.
+*.bin
+*.pt
+*.gguf
+whisper-models/
+models/
+
+# --- IDE / SO ---
+.vscode/
+.idea/
+.DS_Store
