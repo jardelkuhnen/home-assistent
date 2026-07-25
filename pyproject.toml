@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "home-assistent-brain"
+version = "0.1.0"
+description = "Orquestrador multi-agente de automação residencial e IA (arquitetura Cérebro-Satélite)."
+requires-python = ">=3.11"
+readme = "CONTEXT.md"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "langgraph",
+    "langchain",
+    "langchain-core",
+    "langchain-google-genai",
+    "langchain-openai",
+    "tavily-python",
+    "httpx",
+    "pydantic>=2",
+    "pydantic-settings",
+    "faster-whisper",
+    "sounddevice",
+    "numpy",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "mypy",
+    "pre-commit",
+    "pytest",
+    "pytest-asyncio",
+    "respx",
+    "httpx",
+]
+
+[tool.setuptools]
+packages = ["src", "src.graph", "src.tools", "src.services"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "N"]
+
+[tool.ruff.lint.per-file-ignores]
+# Testes podem usar asserções e imports não usados em fixtures.
+"tests/**" = ["S101"]
+# Idioma canônico do FastAPI: Depends/Header como defaults de parâmetro.
+"api.py" = ["B008"]
+
+[tool.mypy]
+strict = true
+packages = ["src"]
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
