@@ -66,6 +66,10 @@ class HomeAssistantClient:
     async def speak(self, text: str) -> dict[str, Any]:
         """Síntese de voz via ``notify.alexa_media``.
 
+        Usa ``target`` (campo padrão do serviço ``notify`` do Home Assistant)
+        para selecionar o ``media_player`` do Alexa — não ``data.entity_id``,
+        que o ``alexa_media`` rejeita com 500.
+
         Não propaga exceções de TTS: em falha retorna ``{"ok": False, "error": ...}``
         para que o nó terminal do grafo decida o fluxo (ADR-0002).
         """
@@ -75,7 +79,7 @@ class HomeAssistantClient:
                 "alexa_media",
                 {
                     "message": text,
-                    "data": {"entity_id": self._settings.alexa_media_entity},
+                    "target": self._settings.alexa_media_entity,
                 },
             )
         except httpx.HTTPError as exc:

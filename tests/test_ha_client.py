@@ -28,11 +28,16 @@ async def test_call_service_success(test_settings) -> None:  # type: ignore[no-u
 async def test_speak_success_returns_ok_true(test_settings) -> None:  # type: ignore[no-untyped-def]
     client = HomeAssistantClient(test_settings)
     with respx.mock(base_url=_HA_URL) as router:
-        router.post("/api/services/notify/alexa_media").mock(
-            return_value=httpx.Response(200, json=[{"entity_id": "media_player.alexa_sala"}])
+        route = router.post("/api/services/notify/alexa_media").mock(
+            return_value=httpx.Response(200, json=[])
         )
         result = await client.speak("olá")
         assert result.get("ok") is True
+        # Payload usa `target` (não data.entity_id) — formato que o HA aceita.
+        sent = route.calls.last.request.content.decode()
+        assert '"target"' in sent
+        assert "media_player.alexa_sala" in sent
+        assert '"data"' not in sent
     await client.close()
 
 

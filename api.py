@@ -26,6 +26,7 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     spoken: bool
+    error: str | None = None
 
 
 async def verify_api_key(
@@ -84,7 +85,8 @@ async def chat(
         reply = last.content if isinstance(last.content, str) else str(last.content)
 
     spoken = bool(result.get("spoken", False))
-    return ChatResponse(reply=reply, spoken=spoken)
+    error = result.get("error")
+    return ChatResponse(reply=reply, spoken=spoken, error=error)
 
 
 # Cliente HTTP do Cérebro — exportado p/ o Satélite reaproveitar com timeout.
