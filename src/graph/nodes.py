@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
 from langgraph.prebuilt import ToolNode
 
 from src.config import get_llm
-from src.graph.prompt import SYSTEM_PROMPT
+from src.graph.prompt import SYSTEM_PROMPT, SYSTEM_PROMPT_TELEGRAM
 from src.graph.state import AgentState
 from src.services.ha_client import HomeAssistantClient
 from src.tools import ALL_TOOLS
@@ -46,11 +46,20 @@ def content_to_text(content: Any) -> str:
 
 
 async def chatbot_node(state: AgentState) -> dict[str, Any]:
-    """Invoca o motor cognitivo com tools e system prompt injetados."""
+    """Invoca o motor cognitivo com tools e system prompt injetados.
+
+    O system prompt varia por canal: ``SYSTEM_PROMPT_TELEGRAM`` quando
+    ``source=="telegram"`` (permite Markdown/respostas mais longas),
+    ``SYSTEM_PROMPT`` caso contrário (voz, texto plano falável).
+    """
     llm = get_llm()
     llm_with_tools = llm.bind_tools(ALL_TOOLS)
 
-    messages: list[BaseMessage] = [SystemMessage(content=SYSTEM_PROMPT), *state["messages"]]
+    source = state.get("source")
+    is_telegram = isinstance(source, str) and source.lower() == "telegram"
+    prompt = SYSTEM_PROMPT_TELEGRAM if is_telegram else SYSTEM_PROMPT
+
+    messages: list[BaseMessage] = [SystemMessage(content=prompt), *state["messages"]]
     response = await llm_with_tools.ainvoke(messages)
 
     ai_message = response if isinstance(response, BaseMessage) else AIMessage(content=str(response))
@@ -64,14 +73,27 @@ def build_tool_node() -> ToolNode:
 
 
 def route_tools(state: AgentState) -> str:
-    """Roteamento condicional: ``tools`` se há tool calls, senão ``end``."""
+    """Roteamento condicional pós-``chatbot``.
+
+    * ``"tools"`` — há tool calls pendentes (qualquer canal).
+    * ``"telegram_end"`` — sem tool calls e ``source=="telegram"``: termina
+      direto em ``END``, **sem** acionar a Alexa (canal de texto isolado).
+    * ``"speak"`` — sem tool calls e canal de voz (``source`` ausente/vazio/
+      ``"satellite"``): segue para o nó ``speak`` (TTS via Home Assistant).
+    """
     messages = state.get("messages", [])
     if not messages:
-        return "end"
-    last = messages[-1]
-    if isinstance(last, AIMessage) and bool(last.tool_calls):
+        last_is_tools = False
+    else:
+        last = messages[-1]
+        last_is_tools = isinstance(last, AIMessage) and bool(last.tool_calls)
+    if last_is_tools:
         return "tools"
-    return "end"
+
+    source = state.get("source")
+    if isinstance(source, str) and source.lower() == "telegram":
+        return "telegram_end"
+    return "speak"
 
 
 def build_speak_node(

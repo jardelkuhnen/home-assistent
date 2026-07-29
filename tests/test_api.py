@@ -68,6 +68,102 @@ def test_chat_valid_key_calls_graph(client: TestClient, monkeypatch: pytest.Monk
     assert body["spoken"] is True
 
 
+def test_chat_without_metadata_defaults_to_satellite(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regressão: sem metadata ⇒ source="satellite" ⇒ speak roda ⇒ spoken=True."""
+    from langchain_core.messages import AIMessage
+
+    async def fake_astream(payload: dict, **kwargs: object):  # noqa: ARG001
+        yield {"chatbot": {"messages": [AIMessage(content="ok")]}}
+        yield {"speak": {"spoken": True, "error": None}}
+
+    monkeypatch.setattr(client.app.state.graph, "astream", fake_astream)
+
+    response = client.post("/chat", json={"text": "oi"}, headers={"X-API-Key": _API_KEY})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source"] == "satellite"
+    assert body["spoken"] is True
+    assert body["metadata"]["tools_used"] == []
+
+
+def test_chat_telegram_source_skips_speak_and_collects_tools(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """source=telegram: grafo termina sem speak (spoken=False) e tools_used populado."""
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    async def fake_astream(payload: dict, **kwargs: object):  # noqa: ARG001
+        ai = AIMessage(content="", tool_calls=[{"name": "get_weather", "args": {}, "id": "1"}])
+        yield {"chatbot": {"messages": [ai]}}
+        yield {
+            "tools": {
+                "messages": [ToolMessage(content="22C", name="get_weather", tool_call_id="1")]
+            }
+        }
+        yield {"chatbot": {"messages": [AIMessage(content="Máxima de 22.")]}}
+        # Sem nó speak — telegram_end.
+
+    monkeypatch.setattr(client.app.state.graph, "astream", fake_astream)
+
+    response = client.post(
+        "/chat",
+        json={"text": "clima em cascavel", "metadata": {"source": "telegram"}},
+        headers={"X-API-Key": _API_KEY},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source"] == "telegram"
+    assert body["spoken"] is False
+    assert body["metadata"]["tools_used"] == ["get_weather"]
+    assert body["reply"] == "Máxima de 22."
+
+
+def test_chat_source_is_case_insensitive(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "Telegram" (maiúsculo) normaliza para telegram e pula a Alexa."""
+    from langchain_core.messages import AIMessage
+
+    async def fake_astream(payload: dict, **kwargs: object):  # noqa: ARG001
+        yield {"chatbot": {"messages": [AIMessage(content="oi")]}}
+
+    monkeypatch.setattr(client.app.state.graph, "astream", fake_astream)
+
+    response = client.post(
+        "/chat",
+        json={"text": "oi", "metadata": {"source": "Telegram"}},
+        headers={"X-API-Key": _API_KEY},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source"] == "telegram"
+    assert body["spoken"] is False
+
+
+def test_chat_empty_source_defaults_to_satellite(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """source vazio/string em branco ⇒ satélite (voz)."""
+    from langchain_core.messages import AIMessage
+
+    async def fake_astream(payload: dict, **kwargs: object):  # noqa: ARG001
+        yield {"chatbot": {"messages": [AIMessage(content="ok")]}}
+        yield {"speak": {"spoken": True, "error": None}}
+
+    monkeypatch.setattr(client.app.state.graph, "astream", fake_astream)
+
+    response = client.post(
+        "/chat",
+        json={"text": "oi", "metadata": {"source": "   "}},
+        headers={"X-API-Key": _API_KEY},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source"] == "satellite"
+
+
 def test_chat_reply_unwraps_gemini_blocks(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

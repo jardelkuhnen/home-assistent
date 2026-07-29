@@ -1,4 +1,4 @@
-.PHONY: setup install format lint typecheck test run-brain run-satellite check
+.PHONY: setup install format lint typecheck test run-brain run-satellite run-telegram check
 
 setup: install
 	pre-commit install
@@ -24,5 +24,8 @@ run-brain:
 
 run-satellite:
 	python satelite.py
+
+run-telegram:
+	python telegram_bot.py
 
 check: lint typecheck test

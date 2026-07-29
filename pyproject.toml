@@ -25,6 +25,7 @@ dependencies = [
     "sounddevice",
     "numpy",
     "pynput",
+    "python-telegram-bot",
 ]
 
 [project.optional-dependencies]

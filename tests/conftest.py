@@ -20,6 +20,8 @@ _ENV: dict[str, str] = {
     "BRAIN_API_KEY": "test-brain-key",
     "BRAIN_URL": "http://localhost:8000",
     "WHISPER_MODEL": "tiny",
+    "TELEGRAM_BOT_TOKEN": "test-telegram-token",
+    "ALLOWED_USERS": "11111,22222",
 }
 
 
