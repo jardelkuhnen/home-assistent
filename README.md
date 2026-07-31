@@ -21,6 +21,7 @@ Media Player via Home Assistant.
 - [Início rápido (start do projeto)](#início-rápido-start-do-projeto)
 - [Como rodar os testes](#como-rodar-os-testes)
 - [Configuração (`.env`)](#configuração-env)
+- [Telegram (canal de texto)](#telegram-canal-de-texto)
 - [Estrutura de diretórios](#estrutura-de-diretórios)
 
 ---
@@ -32,6 +33,7 @@ Media Player via Home Assistant.
 | **Cérebro** | FastAPI + LangGraph + LangChain | Recebe texto, decide via grafo, aciona ferramentas, devolve resposta falável |
 | **Motor cognitivo** | Gemini, OpenAI-compatível ou Ollama local | LLM trocável por configuração (ADR-0001) |
 | **Satélite** | `faster-whisper` (CPU/int8) + `sounddevice` | STT 100% offline, push-to-talk |
+| **Telegram** | `python-telegram-bot` (long polling) | Canal de texto bidirecional, isolado da Alexa |
 | **Integração Física** | Home Assistant REST + Alexa Media Player | Controle de dispositivos IoT e síntese de voz (TTS) |
 | **Ferramentas** | Open-Meteo, Tavily, Home Assistant | Clima, busca web, automação — expostas ao LLM via `@tool` |
 
@@ -372,6 +374,16 @@ curl -X POST http://localhost:8000/chat \
 # {"reply":"Máxima de 28, mínima de 19, pancadas à tarde","spoken":true}
 ```
 
+### 8. (Opcional) Inicie o bot do Telegram (canal de texto)
+
+O Telegram é um **terceiro canal**, por texto e **isolado** da Alexa: as
+mensagens trafegam com `metadata.source="telegram"` e o grafo pula o nó
+`speak` — nada é falado em casa. Veja [Telegram (canal de texto)](#telegram-canal-de-texto).
+
+```bash
+make run-telegram   # python telegram_bot.py (long polling)
+```
+
 ---
 
 ## Como rodar os testes
@@ -442,9 +454,63 @@ Copie `.env.example` para `.env` e preencha. Resumo:
 | `BRAIN_API_KEY` | Chave exigida no header `X-API-Key` do `POST /chat` |
 | `BRAIN_URL` | Onde o Cérebro escuta (default `http://localhost:8000`) |
 | `WHISPER_MODEL` | Tamanho do modelo: `tiny`/`base`/`small`/`medium`/`large-v3` |
+| `TELEGRAM_BOT_TOKEN` | Token do bot criado no BotFather (`/newbot`) |
+| `ALLOWED_USERS` | IDs de usuários autorizados, separados por vírgula (`11111,22222`) |
 
 > ⚠️ **Nunca** commite `.env` com valores reais. Ele está no `.gitignore` e o
 > `gitleaks` escaneia o repositório no pre-commit.
+
+---
+
+## Telegram (canal de texto)
+
+O Telegram é um **terceiro canal**, por texto e **isolado** das notificações
+de voz: mensagens chegam ao Cérebro com `metadata.source="telegram"` e o grafo
+termina em `END` **sem** passar pelo nó `speak` — nada é falado pela Alexa.
+
+### Pré-requisitos
+
+1. No Telegram, fale com o [@BotFather](https://t.me/BotFather) e crie um bot
+   (`/newbot`). Copie o token recebido.
+2. Descubra o seu `user_id`: mande qualquer mensagem ao bot recém-criado e
+   olhe o log do bot — ele registra `WARNING unauthorized user_id=...`. (Ou use
+   o [@userinfobot](https://t.me/userinfobot).)
+
+### Configuração
+
+Preencha no `.env`:
+
+```ini
+TELEGRAM_BOT_TOKEN=123456:ABC...
+ALLOWED_USERS=11111,22222
+```
+
+### Rodando
+
+```bash
+make run-telegram   # python telegram_bot.py (long polling)
+```
+
+Mande "qual a previsão do tempo?" pelo Telegram → receba a resposta de texto,
+com o indicador "digitando..." visível durante o turno, **sem** aviso na Alexa.
+Usuários fora de `ALLOWED_USERS` são ignorados (log `WARNING` no console).
+
+### Contrato do `/chat` (Telegram)
+
+O `metadata.source` controla o roteamento no grafo:
+
+```bash
+# Telegram: pula a Alexa (spoken=false, source="telegram")
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" -H "X-API-Key: $BRAIN_API_KEY" \
+  -d '{"text":"clima em cascavel","metadata":{"source":"telegram"}}'
+# {"reply":"...","spoken":false,"source":"telegram","metadata":{"tools_used":["get_weather"]}}
+
+# Sem metadata: comportamento de voz (satélite/Alexa, spoken=true) — regressão zero
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" -H "X-API-Key: $BRAIN_API_KEY" \
+  -d '{"text":"clima em cascavel"}'
+```
 
 ---
 

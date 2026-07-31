@@ -10,10 +10,10 @@ Centraliza:
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Annotated, Any, Literal, Protocol, runtime_checkable
 
-from pydantic import AnyHttpUrl, SecretStr
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import AnyHttpUrl, SecretStr, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -58,6 +58,37 @@ class Settings(BaseSettings):
 
     # --- STT (faster-whisper) ---
     whisper_model: str = "small"
+
+    # --- Telegram ↔ Cérebro (canal de texto, isolado da Alexa) ---
+    # Token do bot criado no BotFather. Default vazio: o Cérebro não precisa
+    # dessas vars para subir — só o ``telegram_bot.py`` as consome. Assim o
+    # brain inicia mesmo sem o canal Telegram configurado.
+    telegram_bot_token: SecretStr = SecretStr("")
+    # IDs de usuários autorizados a conversar com o bot. No .env vem como
+    # string separada por vírgula ("11111,22222"); o validador converte para
+    # lista de ints. Whitelist de segurança — mensagens de outros usuários
+    # são ignoradas.
+    #
+    # ``NoDecode`` evita que o EnvSettingsSource tente JSON-decodificar o
+    # valor (lista é um tipo "complexo"): a string crua chega ao
+    # ``field_validator`` abaixo, que faz o parsing por vírgula.
+    allowed_users: Annotated[list[int], NoDecode] = []
+
+    @field_validator("allowed_users", mode="before")
+    @classmethod
+    def _parse_allowed_users(cls, v: Any) -> Any:
+        """Aceita ``"11111,22222"`` (env string) e devolve ``[11111, 22222]``.
+
+        ``case_sensitive=False`` no pydantic-settings cobre apenas chaves de
+        env, não valores — por isso o parsing manual. Também tolera espaços,
+        valores já em lista e ``None`` (default ausente).
+        """
+        if v is None:
+            return []
+        if isinstance(v, str):
+            parts = [p.strip() for p in v.split(",") if p.strip()]
+            return [int(p) for p in parts]
+        return v
 
 
 @lru_cache

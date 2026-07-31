@@ -12,7 +12,13 @@ from src.services.ha_client import HomeAssistantClient
 
 
 def build_graph(ha_client: HomeAssistantClient) -> Any:
-    """Compila o grafo: chatbot → (tools → chatbot)* → speak → END."""
+    """Compila o grafo: chatbot → (tools → chatbot)* → speak | END.
+
+    O ``add_conditional_edges`` pós-``chatbot`` tem 3 destinos:
+    * ``tools`` — há tool calls (qualquer canal), executa e volta ao chatbot.
+    * ``speak`` — canal de voz (satélite/Alexa): fala e termina em ``END``.
+    * ``telegram_end`` — canal Telegram: termina direto em ``END``, sem Alexa.
+    """
     graph = StateGraph(AgentState)
 
     # langgraph 1.x tipa add_node com TypeVars de método que não inferem do
@@ -26,7 +32,7 @@ def build_graph(ha_client: HomeAssistantClient) -> Any:
     graph.add_conditional_edges(
         "chatbot",
         route_tools,
-        {"tools": "tools", "end": "speak"},
+        {"tools": "tools", "speak": "speak", "telegram_end": END},
     )
     graph.add_edge("tools", "chatbot")
     graph.add_edge("speak", END)

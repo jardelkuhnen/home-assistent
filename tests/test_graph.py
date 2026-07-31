@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from src.config import Settings
-from src.graph.nodes import build_speak_node, content_to_text, route_tools
-from src.graph.prompt import SYSTEM_PROMPT
+from src.graph.nodes import build_speak_node, chatbot_node, content_to_text, route_tools
+from src.graph.prompt import SYSTEM_PROMPT, SYSTEM_PROMPT_TELEGRAM
 from src.graph.state import AgentState
 from src.services.ha_client import HomeAssistantClient
 
@@ -53,15 +54,105 @@ def test_route_tools_with_tool_calls() -> None:
     assert route_tools({"messages": [ai], "spoken": False, "error": None}) == "tools"
 
 
-def test_route_tools_without_tool_calls() -> None:
+def test_route_tools_without_tool_calls_routes_to_speak() -> None:
+    """Canal de voz (source ausente) sem tool calls → speak (Alexa)."""
     ai = AIMessage(content="pronto")
-    assert route_tools({"messages": [ai], "spoken": False, "error": None}) == "end"
+    assert route_tools({"messages": [ai], "spoken": False, "error": None}) == "speak"
+
+
+def test_route_tools_satellite_routes_to_speak() -> None:
+    ai = AIMessage(content="pronto")
+    state = {"messages": [ai], "spoken": False, "error": None, "source": "satellite"}
+    assert route_tools(state) == "speak"
+
+
+def test_route_tools_telegram_routes_to_end() -> None:
+    """Telegram sem tool calls → telegram_end (pula a Alexa)."""
+    ai = AIMessage(content="pronto")
+    state = {"messages": [ai], "spoken": False, "error": None, "source": "telegram"}
+    assert route_tools(state) == "telegram_end"
+
+
+def test_route_tools_telegram_case_insensitive() -> None:
+    ai = AIMessage(content="pronto")
+    state = {"messages": [ai], "spoken": False, "error": None, "source": "Telegram"}
+    assert route_tools(state) == "telegram_end"
+
+
+def test_route_tools_telegram_with_tool_calls_still_tools() -> None:
+    """Telegram com tool calls → tools (o loop de tools roda em qualquer canal)."""
+    ai = AIMessage(content="", tool_calls=[{"name": "get_weather", "args": {}, "id": "1"}])
+    state = {"messages": [ai], "spoken": False, "error": None, "source": "telegram"}
+    assert route_tools(state) == "tools"
 
 
 def test_system_prompt_has_no_markdown() -> None:
     assert "#" not in SYSTEM_PROMPT
     assert "**" not in SYSTEM_PROMPT
     assert "```" not in SYSTEM_PROMPT
+
+
+def test_telegram_prompt_allows_markdown() -> None:
+    """O prompt do Telegram permite Markdown/listas (diferente do de voz)."""
+    assert "Markdown" in SYSTEM_PROMPT_TELEGRAM
+    assert "Telegram" in SYSTEM_PROMPT_TELEGRAM
+
+
+async def test_chatbot_node_selects_telegram_prompt(
+    test_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    """chatbot_node injeta SYSTEM_PROMPT_TELEGRAM quando source=="telegram"."""
+    captured: dict[str, object] = {}
+
+    class _Bound:
+        async def ainvoke(self, messages, config=None, **kwargs):  # noqa: ANN001, ARG002
+            captured["messages"] = messages
+            return AIMessage(content="ok")
+
+    class _LLM:
+        def bind_tools(self, tools, **kwargs):  # noqa: ANN001, ARG002
+            return _Bound()
+
+    monkeypatch.setattr("src.graph.nodes.get_llm", lambda: _LLM())
+    state: AgentState = {
+        "messages": [HumanMessage(content="oi")],
+        "spoken": False,
+        "error": None,
+        "source": "telegram",
+        "session_id": "telegram_42",
+    }
+    await chatbot_node(state)
+    messages = list(captured["messages"])  # type: ignore[arg-type]
+    assert isinstance(messages[0], SystemMessage)
+    assert messages[0].content == SYSTEM_PROMPT_TELEGRAM
+
+
+async def test_chatbot_node_selects_voice_prompt_by_default(
+    test_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    """Sem source (satélite), chatbot_node injeta SYSTEM_PROMPT (voz)."""
+    captured: dict[str, object] = {}
+
+    class _Bound:
+        async def ainvoke(self, messages, config=None, **kwargs):  # noqa: ANN001, ARG002
+            captured["messages"] = messages
+            return AIMessage(content="ok")
+
+    class _LLM:
+        def bind_tools(self, tools, **kwargs):  # noqa: ANN001, ARG002
+            return _Bound()
+
+    monkeypatch.setattr("src.graph.nodes.get_llm", lambda: _LLM())
+    state: AgentState = {
+        "messages": [HumanMessage(content="oi")],
+        "spoken": False,
+        "error": None,
+        "source": None,
+        "session_id": None,
+    }
+    await chatbot_node(state)
+    messages = list(captured["messages"])  # type: ignore[arg-type]
+    assert messages[0].content == SYSTEM_PROMPT
 
 
 def test_build_graph_compiles(test_settings: Settings) -> None:  # type: ignore[no-untyped-def]
