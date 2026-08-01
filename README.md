@@ -308,6 +308,15 @@ S  -> U : (sem voz) — log mostra spoken=false
   o **Alexa Media Player** configurado — sem isso o Cérebro sobe e os testes
   passam, mas o TTS real não funcionará.
 
+```bash
+ollama run llama3.2:3b
+
+
+run docker-compose home-assistent/docker-compose.yml
+
+```
+
+
 ### 1. Clone e entre no diretório
 
 ```bash
