@@ -24,7 +24,7 @@ dependencies = [
     "faster-whisper",
     "sounddevice",
     "numpy",
-    "pynput",
+    "openwakeword>=0.6.0,<0.7",
     "python-telegram-bot",
 ]
 

@@ -1,20 +1,23 @@
-"""Satélite — captação de voz e STT 100% offline (faster-whisper).
+"""Satélite — wake word, captação de voz e STT 100% offline.
 
-Push-to-talk (segurar Shift): aguarda o usuário segurar Shift → grava áudio
-enquanto a tecla fica pressionada → transcreve (pt) → POST /chat ao Cérebro
-com header ``X-API-Key`` → loga reply e spoken.
+Fica escutando o microfone: ao ouvir "hey jarvis" (openWakeWord) grava o
+comando até detectar silêncio (VAD) → transcreve com faster-whisper (pt) →
+POST /chat ao Cérebro com header ``X-API-Key`` → loga reply e spoken → volta a
+escutar.
 
-``capture_audio()`` fica isolada como ponto de extensão para VAD futuro sem
-reescrever o pipeline.
+``capture_audio()`` é a única costura com o hardware; a lógica de estados vive
+em ``_listen()`` (pura, testável sem microfone).
 """
 
 from __future__ import annotations
 
 import asyncio
+import queue
 import sys
 import threading
-from collections.abc import Awaitable, Callable, Iterable
-from typing import TypeVar
+from collections.abc import Awaitable, Callable, Iterable, Iterator
+from functools import lru_cache
+from typing import Any, TypeVar
 
 import httpx
 import numpy as np
@@ -23,23 +26,47 @@ from src.config import Settings, get_settings
 
 # Taxa de amostragem do áudio capturado (16 kHz, mono, 16-bit).
 _SAMPLE_RATE = 16_000
-# Teto de segurança: se o soltar do Shift não for detectado, para de gravar.
-_MAX_RECORD_SECONDS = 30
-_SHIFT_KEYS = ("shift", "shift_l", "shift_r")
 # Blocos de 80 ms (1280 amostras): múltiplo exigido pelo openWakeWord.
 _BLOCK_SAMPLES = 1_280
 _BLOCK_SECONDS = _BLOCK_SAMPLES / _SAMPLE_RATE
+# VAD: score ≥ limiar é fala. frame_size precisa dividir o bloco de 1280.
+_VAD_THRESHOLD = 0.5
+_VAD_FRAME_SAMPLES = 640
+# Setado ao encerrar (Ctrl+C) para liberar a thread de captura, que de outro
+# modo ficaria bloqueada esperando o wake word e impediria o processo de sair.
+_stop = threading.Event()
 
 _T = TypeVar("_T")
 
 
-def transcribe(audio: bytes, settings: Settings | None = None) -> str:
-    """Transcreve áudio PCM com faster-whisper (offline, language=pt)."""
+@lru_cache
+def _load_whisper(name: str) -> Any:
+    """Carrega o WhisperModel uma vez por processo (o loop de escuta o reusa)."""
     from faster_whisper import WhisperModel
 
+    return WhisperModel(name, device="cpu", compute_type="int8")
+
+
+@lru_cache
+def _load_wake_model(name: str) -> Any:
+    """Carrega o modelo de wake word (ONNX). Os arquivos vêm de ``download_models``."""
+    from openwakeword.model import Model
+
+    return Model(wakeword_models=[name], inference_framework="onnx")
+
+
+@lru_cache
+def _load_vad() -> Any:
+    """Carrega o VAD (Silero, ONNX) do openWakeWord."""
+    from openwakeword.vad import VAD
+
+    return VAD()
+
+
+def transcribe(audio: bytes, settings: Settings | None = None) -> str:
+    """Transcreve áudio PCM com faster-whisper (offline, language=pt)."""
     s = settings or get_settings()
-    model = WhisperModel(s.whisper_model, device="cpu", compute_type="int8")
-    import numpy as np
+    model = _load_whisper(s.whisper_model)
 
     samples = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
     segments, _info = model.transcribe(samples, language="pt")
@@ -99,65 +126,59 @@ def _listen(
     return np.concatenate(recorded).tobytes()
 
 
-def capture_audio(max_seconds: int = _MAX_RECORD_SECONDS) -> bytes:
-    """Captura áudio via sounddevice enquanto o Shift é mantido pressionado.
+def _drain(audio_q: queue.Queue[np.ndarray], stop: threading.Event) -> Iterator[np.ndarray]:
+    """Gera blocos da fila até ``stop`` ser setado.
 
-    Push-to-talk: a gravação começa no ``key press`` do Shift e para no
-    ``key release`` (ou ao atingir ``max_seconds``, por segurança). Retorna
-    PCM mono 16-bit a 16 kHz.
-
-    Usa ``pynput`` para detectar o Shift (tecla modificadora, sem caractere).
-    No macOS, exige permissão de Accessibility para o terminal que roda o
-    Satélite (System Settings → Privacy & Security → Accessibility).
-
-    Ponto de extensão: trocar push-to-talk por VAD significa substituir só
-    esta função — o restante do pipeline não muda.
+    Consulta ``stop`` a cada 0,2 s: sem isso, ``get()`` bloquearia para sempre
+    com o microfone mudo e o processo não conseguiria encerrar.
     """
-    import numpy as np
-    import sounddevice as sd
-    from pynput import keyboard
+    while not stop.is_set():
+        try:
+            yield audio_q.get(timeout=0.2)
+        except queue.Empty:
+            continue
 
-    chunks: list[np.ndarray] = []
-    started = threading.Event()
-    stopped = threading.Event()
+
+def capture_audio(settings: Settings | None = None) -> bytes:
+    """Espera o wake word e grava uma fala até o silêncio. Devolve PCM int16 16 kHz.
+
+    Abre um único ``InputStream`` (não perde o começo do comando entre o wake
+    word e a gravação) e o fecha ao retornar — durante a transcrição e a
+    chamada ao Cérebro o microfone fica mudo. Devolve ``b""`` num falso positivo
+    (wake word sem fala em seguida).
+
+    Requer os modelos do openWakeWord já baixados (``download_models``); se
+    faltarem, ``Model``/``VAD`` levantam na abertura (fail fast).
+    """
+    import sounddevice as sd
+
+    s = settings or get_settings()
+    wake_model = _load_wake_model(s.wake_word_model)
+    vad = _load_vad()
+    # Os modelos vivem o processo inteiro e guardam estado interno: zera para
+    # que o áudio da fala anterior não contamine esta.
+    wake_model.reset()
+    vad.reset_states()
+
+    audio_q: queue.Queue[np.ndarray] = queue.Queue()
 
     def callback(indata: np.ndarray, frames: int, time_info: object, status: object) -> None:  # noqa: ARG001
-        chunks.append(indata.copy())
+        audio_q.put(indata[:, 0].copy())
 
-    def on_press(key: object) -> None:
-        if _is_shift(key) and not started.is_set():
-            started.set()
+    def wake_score(block: np.ndarray) -> float:
+        return float(wake_model.predict(block)[s.wake_word_model])
 
-    def on_release(key: object) -> None:
-        if _is_shift(key):
-            stopped.set()
+    def is_speech(block: np.ndarray) -> bool:
+        return bool(vad.predict(block, frame_size=_VAD_FRAME_SAMPLES) >= _VAD_THRESHOLD)
 
-    stream = sd.InputStream(samplerate=_SAMPLE_RATE, channels=1, dtype="int16", callback=callback)
-    listener = keyboard.Listener(on_press=on_press, on_release=on_release)
-    listener.start()
-
-    # Aguarda o primeiro press do Shift para iniciar a captura.
-    started.wait()
-    stream.start()
-    try:
-        # Para no release do Shift ou no teto de segurança.
-        stopped.wait(timeout=max_seconds)
-    finally:
-        stream.stop()
-        stream.close()
-        listener.stop()
-
-    if not chunks:
-        return b""
-    return np.concatenate(chunks, axis=0).tobytes()
-
-
-def _is_shift(key: object) -> bool:
-    """True se ``key`` (pynput) é qualquer variante do Shift."""
-    name = getattr(key, "name", None) or getattr(key, "chars", None)
-    if isinstance(name, str):
-        return name in _SHIFT_KEYS
-    return False
+    with sd.InputStream(
+        samplerate=_SAMPLE_RATE,
+        channels=1,
+        dtype="int16",
+        blocksize=_BLOCK_SAMPLES,
+        callback=callback,
+    ):
+        return _listen(_drain(audio_q, _stop), wake_score, is_speech, s)
 
 
 async def send_to_brain(

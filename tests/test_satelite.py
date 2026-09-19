@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import queue
+import threading
 
 import httpx
 import numpy as np
@@ -98,21 +100,6 @@ def test_transcribe_returns_string(
     result = transcribe(audio)
     assert isinstance(result, str)
     assert result == "ligar a luz da sala"
-
-
-def test_is_shift_detects_all_variants() -> None:
-    """_is_shift reconhece shift, shift_l e shift_r (pynput Key)."""
-    from satelite import _is_shift
-
-    class _K:
-        def __init__(self, name: str | None) -> None:
-            self.name = name
-
-    assert _is_shift(_K("shift")) is True
-    assert _is_shift(_K("shift_l")) is True
-    assert _is_shift(_K("shift_r")) is True
-    assert _is_shift(_K("enter")) is False
-    assert _is_shift(_K(None)) is False
 
 
 async def test_with_spinner_runs_coro_and_returns_result(
@@ -234,3 +221,67 @@ def test_listen_ignores_score_below_threshold(listen_settings: Settings) -> None
 
     # threshold default = 0.5; 0.49 não dispara.
     assert _listen(blocks, lambda b: 0.49, _fake_is_speech, listen_settings) == b""
+
+
+@pytest.fixture(autouse=True)
+def _clear_model_caches() -> None:
+    """Os loaders de modelo têm lru_cache; isola os testes entre si."""
+    import satelite
+
+    satelite._load_whisper.cache_clear()
+    satelite._load_wake_model.cache_clear()
+    satelite._load_vad.cache_clear()
+    satelite._stop.clear()
+
+
+def test_transcribe_loads_whisper_model_only_once(
+    test_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Num loop, recarregar o WhisperModel a cada fala custaria segundos por comando."""
+    loads: list[str] = []
+
+    class _Segment:
+        text = "oi"
+
+    class _FakeModel:
+        def transcribe(self, audio, language="pt"):  # noqa: ANN001
+            return iter([_Segment()]), None
+
+    def fake_whisper(model, device, compute_type):  # noqa: ANN001
+        loads.append(model)
+        return _FakeModel()
+
+    import faster_whisper
+
+    monkeypatch.setattr(faster_whisper, "WhisperModel", fake_whisper)
+
+    audio = b"\x00\x00" * 1600
+    assert transcribe(audio) == "oi"
+    assert transcribe(audio) == "oi"
+    assert loads == ["tiny"]  # WHISPER_MODEL=tiny no ambiente de teste
+
+
+def test_drain_yields_until_stop_is_set() -> None:
+    from satelite import _drain
+
+    audio_q: queue.Queue[str] = queue.Queue()
+    stop = threading.Event()
+    audio_q.put("a")
+    audio_q.put("b")
+
+    it = _drain(audio_q, stop)
+    assert next(it) == "a"
+    stop.set()
+    with pytest.raises(StopIteration):
+        next(it)
+
+
+def test_drain_returns_when_stopped_while_queue_is_empty() -> None:
+    """Sem áudio na fila, o gerador não pode bloquear para sempre: precisa notar o stop."""
+    from satelite import _drain
+
+    audio_q: queue.Queue[str] = queue.Queue()
+    stop = threading.Event()
+    threading.Timer(0.05, stop.set).start()
+
+    assert list(_drain(audio_q, stop)) == []
