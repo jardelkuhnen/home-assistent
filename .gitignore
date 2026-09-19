@@ -37,3 +37,10 @@ models/
 .idea/
 .DS_Store
 .claude/settings.local.json
+.coverage
+
+
+# --- Superpowers SDD scratch ---
+.superpowers/
+
+

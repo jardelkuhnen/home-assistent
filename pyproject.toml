@@ -35,6 +35,8 @@ dev = [
     "pre-commit",
     "pytest",
     "pytest-asyncio",
+    "pytest-cov",
+    "pip-audit",
     "respx",
     "httpx",
 ]
