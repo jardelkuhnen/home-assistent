@@ -17,7 +17,7 @@ via `POST /chat`. Depois volta a escutar.
 | Hardware alvo | Raspberry Pi / mini-PC dedicado, headless, sempre ligado |
 | Feedback ao detectar | Só log no stderr (comportamento atual). Sem beep, sem aviso pela Alexa |
 | Motor de wake word | openWakeWord, modelo pré-treinado `hey_jarvis`, backend ONNX |
-| VAD | `openwakeword.vad.VAD` (já vem com a dependência) |
+| VAD | `openwakeword.vad.VAD` (mesma dependência; o modelo `silero_vad.onnx` é baixado junto com os de wake word) |
 | `pynput` | Removido: depende de teclado/X, inexistente num Pi headless |
 
 Descartados: Porcupine (exige AccessKey e ativação online, contra o princípio
@@ -96,15 +96,17 @@ atualizados (o README também deixa de mencionar push-to-talk).
 
 ### Provisionamento
 
-Os modelos do openWakeWord **não vêm no pacote**. Um passo explícito, uma vez
-por dispositivo e com rede, documentado no README:
+Nada vem no pacote: nem os modelos de wake word, nem os de features
+(melspectrogram/embedding), nem o `silero_vad.onnx` do VAD. Um passo
+explícito, uma vez por dispositivo e com rede, documentado no README:
 
 ```bash
-python -c "import openwakeword; openwakeword.utils.download_models()"
+python -c "import openwakeword; openwakeword.utils.download_models(['hey_jarvis'])"
 ```
 
-Se o modelo faltar, `Model(...)` falha na abertura; o erro propaga (fail fast),
-sem download implícito.
+`download_models` baixa sempre os modelos de features e o VAD, além dos
+modelos pedidos (`.tflite` e `.onnx`). Se algum arquivo faltar, `Model(...)` ou
+`VAD()` falha na abertura; o erro propaga (fail fast), sem download implícito.
 
 ### Erros e casos de borda
 
@@ -137,22 +139,55 @@ sem download implícito.
   plataformas (TFLite não no Windows); os modelos são baixados por
   `openwakeword.utils.download_models()`.
 - `openwakeword.vad.VAD`: `predict(x, frame_size=480)` devolve a probabilidade
-  média de fala, a entrada tem de ser múltiplo de `frame_size`, `reset_states()`
-  existe e o modelo ONNX do VAD já vem incluído.
+  média de fala, a entrada tem de ser múltiplo de `frame_size` e `reset_states()`
+  existe. O modelo ONNX do VAD **não** vem incluído: é baixado por
+  `download_models()`.
 - O VAD do faster-whisper não tem API pública documentada por bloco e usa um
   modelo versionado (`silero_vad_v6.onnx`); por isso não foi escolhido.
 
-## Pontos a confirmar na implementação
+## Confirmado no código instalado (openwakeword 0.6.0, Python 3.12)
 
-Não estavam claros na documentação; o primeiro passo do plano é resolvê-los
-lendo o código instalado, antes de escrever a máquina de estados. Se algum
-falhar, para-se e revisa-se este spec.
+1. `Model.__init__` aceita `inference_framework` (`"tflite"` default, ou
+   `"onnx"`). Nomes pré-treinados são resolvidos por
+   `get_pretrained_model_paths(inference_framework)`, então
+   `Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")` procura
+   o `.onnx`.
+2. `VAD.predict` faz `x/32767` internamente: recebe **int16 bruto**, exatamente o
+   que o `InputStream` entrega, sem conversão. O comprimento deve ser múltiplo
+   de `frame_size`; `frame_size=640` divide o bloco de 1280 amostras.
+3. `Model.predict` devolve um dict de scores indexado pelo nome passado em
+   `wakeword_models` (aqui, a chave `"hey_jarvis"`).
 
-1. `Model` aceita `inference_framework="onnx"` na versão fixada.
-2. Dtype esperado por `VAD.predict` (int16 bruto ou float32 normalizado) e
-   `frame_size` compatível com o bloco de 1280 amostras.
-3. Uso do `hey_jarvis` a partir de `Model(wakeword_models=["hey_jarvis"])`
-   depois do `download_models()`, e a chave do dicionário de scores devolvido.
+**Por que ONNX e não o default tflite:** a documentação do próprio
+openWakeWord diz que tflite é mais eficiente em x86/ARM64, mas o
+`tflite-runtime` não é garantido para Python 3.12 (não verificado no Pi) e o
+`pip install openwakeword` neste Mac trouxe só o `onnxruntime`. ONNX é o
+denominador comum (Mac de desenvolvimento e Pi) e o Makefile
+fixa o 3.12. Se o consumo de CPU no Pi for problema, reavaliar tflite; o teste
+de fumaça mede isso.
+
+## Teste de fumaça (Mac x86, Python 3.12, voz sintética do `say`)
+
+`Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")` e `VAD()`
+instanciam e rodam com blocos int16 de 1280 amostras:
+
+- `predict()` devolve `{'hey_jarvis': float}`; `VAD.predict(..., frame_size=640)`
+  devolve `float32`.
+- Fluxo silêncio + "hey jarvis" + silêncio + comando + silêncio: o score do
+  wake word foi de 0.08 para 0.82 e 0.99 no fim da frase (limiar 0.5 dispara
+  no bloco de 1.76 s) e ficou em 0.000 durante o comando. O VAD deu ≥0.97 em
+  fala e ≤0.05 em silêncio, com separação limpa em torno de 0.5.
+- Custo: ~4.4 ms por bloco de 80 ms (~5% de um core) neste Mac. **O Pi não foi
+  medido**; é o item principal do teste de fumaça no dispositivo.
+
+Limites: voz sintética, sem microfone real nem ruído de sala. Limiares finais
+se ajustam no dispositivo.
+
+**Consequência para o design:** o `Model` e o `VAD` guardam estado interno
+(buffer de features do wake word, LSTM do VAD) e vivem o processo inteiro. No
+início de cada `capture_audio`, chamar `model.reset()` e `vad.reset_states()`
+(ambos existem e rodaram no teste), para que áudio de uma fala anterior não
+contamine a próxima. Também se chama `vad.reset_states()` ao entrar em GRAVANDO.
 
 ## Licença
 
