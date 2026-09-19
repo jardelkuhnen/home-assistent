@@ -86,6 +86,8 @@ def test_chat_without_metadata_defaults_to_satellite(
     assert body["source"] == "satellite"
     assert body["spoken"] is True
     assert body["metadata"]["tools_used"] == []
+    # Campo aditivo: sem tool_diagnostics no update ⇒ lista vazia na resposta.
+    assert body["metadata"]["tool_diagnostics"] == []
 
 
 def test_chat_telegram_source_skips_speak_and_collects_tools(
@@ -200,3 +202,78 @@ def test_chat_reply_unwraps_gemini_blocks(
     assert "Chatbot Agent" in caplog.text
     assert "Tool Agent" in caplog.text
     assert "Speak Agent" in caplog.text
+
+
+def test_chat_exposes_tool_diagnostics_on_error(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Falha de tool: diagnóstico exposto em metadata.tool_diagnostics e timeline.
+
+    O diagnóstico NÃO pode vazar para ``reply`` (texto amigável p/ Alexa).
+    """
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+
+    async def fake_astream(payload: dict, **kwargs: object):  # noqa: ARG001
+        ai = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "control_device",
+                    "args": {"action": "on", "entity_id": "light.cozinha"},
+                    "id": "1",
+                }
+            ],
+        )
+        yield {"chatbot": {"messages": [ai]}}
+        yield {
+            "tools": {
+                "messages": [
+                    ToolMessage(
+                        content="Não consegui acionar o dispositivo.",
+                        name="control_device",
+                        tool_call_id="1",
+                    )
+                ],
+                "tool_diagnostics": [
+                    {
+                        "tool": "control_device",
+                        "entity_id": "light.cozinha",
+                        "action": "on",
+                        "status_code": 404,
+                        "body": "entity not found",
+                        "error": "HTTPStatusError",
+                    }
+                ],
+            }
+        }
+        friendly_reply = "Não consegui acionar a luz da cozinha."
+        yield {"chatbot": {"messages": [AIMessage(content=friendly_reply)]}}
+        yield {"speak": {"spoken": True, "error": None}}
+
+    monkeypatch.setattr(client.app.state.graph, "astream", fake_astream)
+
+    response = client.post(
+        "/chat", json={"text": "ligar a luz da cozinha"}, headers={"X-API-Key": _API_KEY}
+    )
+    assert response.status_code == 200
+    body = response.json()
+
+    diagnostics = body["metadata"]["tool_diagnostics"]
+    assert len(diagnostics) == 1
+    diagnostic = diagnostics[0]
+    assert diagnostic["tool"] == "control_device"
+    assert diagnostic["entity_id"] == "light.cozinha"
+    assert diagnostic["status_code"] == 404
+    assert "entity not found" in diagnostic["body"]
+    assert diagnostic["error"] == "HTTPStatusError"
+
+    # Texto amigável p/ a Alexa — diagnóstico não vaza para a fala.
+    assert body["reply"] == "Não consegui acionar a luz da cozinha."
+    assert "entity not found" not in body["reply"]
+
+    # Timeline registra o erro da tool com o diagnóstico.
+    assert "Erro na tool" in caplog.text
+    assert "light.cozinha" in caplog.text
+    assert "404" in caplog.text

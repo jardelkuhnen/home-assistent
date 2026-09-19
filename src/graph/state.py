@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, TypedDict
+from typing import Annotated, Any, TypedDict
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
@@ -21,6 +21,10 @@ class AgentState(TypedDict):
     * ``session_id`` — identificador de sessão do canal (ex. ``telegram_<chat>``).
       Aceito e levado ao estado, **não consumido** — reservado para um
       checkpointer de memória futuro.
+    * ``tool_diagnostics`` — diagnósticos de falha das tool calls, um dict por
+      erro (contrato: ``{tool, entity_id, action, status_code, body, error}``),
+      preenchido pelo nó ``tools`` (sobrescrita mesclada, sem reducer — cada
+      execução do nó substitui a lista). Default ``[]`` (campo aditivo).
     """
 
     messages: Annotated[list[BaseMessage], add_messages]
@@ -28,3 +32,4 @@ class AgentState(TypedDict):
     error: str | None
     source: str | None
     session_id: str | None
+    tool_diagnostics: list[dict[str, Any]]

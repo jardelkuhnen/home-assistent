@@ -179,6 +179,15 @@ async def run_once() -> None:
         print(f"Não consegui falar com o Cérebro: {exc}", file=sys.stderr)
         return
     print(f"Cérebro: {result.get('reply')} (spoken={result.get('spoken')})", file=sys.stderr)
+    # Diagnóstico do HA (metadata.tool_diagnostics): só stderr, nunca fala.
+    metadata = result.get("metadata")
+    if isinstance(metadata, dict):
+        for diagnostic in metadata.get("tool_diagnostics", []):
+            print(
+                f"  [tool] {diagnostic['tool']} {diagnostic['action']} {diagnostic['entity_id']}"
+                f" -> {diagnostic['status_code']} {diagnostic['body'][:120]}",
+                file=sys.stderr,
+            )
 
 
 def main() -> None:
