@@ -7,11 +7,15 @@ para que o nó do grafo decida o que fazer.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
 
 from src.config import Settings, get_settings
+
+# Mesmo logger do ``api.py``: os logs aparecem no console do brain (uvicorn).
+logger = logging.getLogger("uvicorn.error")
 
 
 class HomeAssistantClient:
@@ -36,6 +40,18 @@ class HomeAssistantClient:
             f"/api/services/{domain}/{service}",
             json=service_data or {},
         )
+        # Loga o retorno do HA ANTES de ``raise_for_status()`` — observabilidade
+        # do resultado/erro (status + body truncado) no console do brain.
+        if response.status_code >= 400:
+            logger.error(
+                "%s/%s -> %s %s",
+                domain,
+                service,
+                response.status_code,
+                response.text[:500],
+            )
+        else:
+            logger.info("%s/%s -> %s", domain, service, response.status_code)
         response.raise_for_status()
         result: Any = response.json()
         if isinstance(result, dict):
