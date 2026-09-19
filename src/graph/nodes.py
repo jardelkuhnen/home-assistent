@@ -71,12 +71,21 @@ def content_to_text(content: Any) -> str:
     return str(content)
 
 
+_LLM_FALLBACK = "Desculpe, tive um problema para processar agora. Tente de novo em um instante."
+
+
 async def chatbot_node(state: AgentState) -> dict[str, Any]:
     """Invoca o motor cognitivo com tools e system prompt injetados.
 
     O system prompt varia por canal: ``SYSTEM_PROMPT_TELEGRAM`` quando
     ``source=="telegram"`` (permite Markdown/respostas mais longas),
     ``SYSTEM_PROMPT`` caso contrário (voz, texto plano falável).
+
+    Robustez: exceções do motor cognitivo (timeout do Ollama local, erro de
+    rede, sobrecarga) são capturadas aqui — logadas e convertidas em uma
+    ``AIMessage`` amigável + ``error`` no estado. Sem isso, qualquer falha do
+    LLM propagaria e viraria 500 no endpoint /chat. O grafo segue para
+    ``speak``/``telegram_end`` e o usuário ouve/lê o erro natural.
     """
     llm = get_llm()
     llm_with_tools = llm.bind_tools(ALL_TOOLS)
@@ -89,13 +98,25 @@ async def chatbot_node(state: AgentState) -> dict[str, Any]:
     # Catálogo de dispositivos: injetado como SystemMessage extra quando
     # populado, para o LLM escolher o entity_id correto ao chamar
     # control_device. Vazio/ausente ⇒ omitido (sem regressão).
+    #
+    # Omitido na 2ª chamada do turno (pós-tool): se há ToolMessage no histórico,
+    # o dispositivo já foi resolvido e o LLM só formata a resposta — reenviar o
+    # catálogo dobra o custo do prompt no caminho crítico (controle de
+    # dispositivo) e empurra o TTFB de um LLM local (Ollama CPU) além do
+    # timeout. Halve o custo sem perder cobertura.
     catalog = get_catalog()
-    if catalog is not None:
+    has_tool_result = any(isinstance(m, ToolMessage) for m in state.get("messages", []))
+    if catalog is not None and not has_tool_result:
         context = catalog.as_context()
         if context:
             messages.append(SystemMessage(content=context))
     messages.extend(state["messages"])
-    response = await llm_with_tools.ainvoke(messages)
+
+    try:
+        response = await llm_with_tools.ainvoke(messages)
+    except Exception as exc:  # noqa: BLE001 — não derrubar o /chat em falha do LLM
+        logger.error("chatbot_node: motor cognitivo falhou: %s: %s", type(exc).__name__, exc)
+        return {"messages": [AIMessage(content=_LLM_FALLBACK)], "error": _LLM_FALLBACK}
 
     ai_message = response if isinstance(response, BaseMessage) else AIMessage(content=str(response))
 

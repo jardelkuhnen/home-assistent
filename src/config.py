@@ -36,7 +36,13 @@ class Settings(BaseSettings):
     openai_api_base: str = ""
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "llama3.2:3b"
-    llm_timeout_s: float = 30.0
+    # Timeout do motor cognitivo. 60s acomoda um LLM local (Ollama em CPU)
+    # fazendo tool-calling com o catálogo de dispositivos injetado no prompt
+    # — o TTFB cresce ~0.34s por dispositivo do catálogo, e 30s estourava em
+    # instalações reais + cold start. Para clouds (Gemini/OpenAI) é só teto,
+    # não afeta latência normal. Bem abaixo do brain_timeout_s (90s) do hop
+    # Satélite→Cérebro, então o satélite não desiste antes do LLM.
+    llm_timeout_s: float = 60.0
 
     # --- Home Assistant / Alexa ---
     ha_url: AnyHttpUrl
