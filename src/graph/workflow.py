@@ -24,7 +24,9 @@ def build_graph(ha_client: HomeAssistantClient) -> Any:
     # langgraph 1.x tipa add_node com TypeVars de método que não inferem do
     # callable em mypy strict; a closure do speak_node dispara um falso-positivo.
     graph.add_node("chatbot", chatbot_node)
-    graph.add_node("tools", build_tool_node())
+    # Nós custom (Callable → Awaitable) disparam falso-positivo de tipo no
+    # langgraph 1.x — mesmo caso do speak_node abaixo.
+    graph.add_node("tools", build_tool_node())  # type: ignore[arg-type]
     graph.add_node("speak", build_speak_node(ha_client))  # type: ignore[arg-type]
 
     graph.set_entry_point("chatbot")

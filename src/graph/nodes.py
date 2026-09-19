@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
-from langgraph.prebuilt import ToolNode
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 
 from src.config import get_llm
 from src.graph.prompt import SYSTEM_PROMPT, SYSTEM_PROMPT_TELEGRAM
 from src.graph.state import AgentState
 from src.services.ha_client import HomeAssistantClient
 from src.tools import ALL_TOOLS
+from src.tools.home import _FALLBACK
+
+# Mesmo logger do ``api.py``: os logs aparecem no console do brain (uvicorn).
+logger = logging.getLogger("uvicorn.error")
 
 # Alias de tipo para os nós do grafo. Nós devolvem estado parcial (reducer
 # ``add_messages``/sobrescrita mesclam no estado completo).
@@ -67,9 +71,78 @@ async def chatbot_node(state: AgentState) -> dict[str, Any]:
     return {"messages": [ai_message]}
 
 
-def build_tool_node() -> ToolNode:
-    """Nó que executa as tool calls pendentes."""
-    return ToolNode(ALL_TOOLS)
+def build_tool_node() -> Node:
+    """Factory do nó ``tools``: executa cada tool call pendente com diagnóstico.
+
+    Substitui o ``ToolNode`` pré-construído. Em sucesso devolve a ``ToolMessage``
+    normal (retorno da tool) para o LLM. Em falha (exceção da tool — ex. erro
+    HTTP do Home Assistant), loga o diagnóstico, devolve uma ``ToolMessage``
+    amigável (``_FALLBACK``) para o LLM e acumula o diagnóstico no estado
+    (``tool_diagnostics``), sem interromper o grafo.
+    """
+
+    async def tool_node(state: AgentState) -> dict[str, Any]:
+        messages = state.get("messages", [])
+        if not messages:
+            return {"messages": []}
+        last = messages[-1]
+        if not (isinstance(last, AIMessage) and last.tool_calls):
+            return {"messages": []}
+
+        tool_messages: list[ToolMessage] = []
+        diagnostics: list[dict[str, Any]] = []
+        for tool_call in last.tool_calls:
+            tool = next((t for t in ALL_TOOLS if t.name == tool_call["name"]), None)
+            if tool is None:
+                diagnostic: dict[str, Any] = {
+                    "tool": tool_call["name"],
+                    "entity_id": tool_call["args"].get("entity_id"),
+                    "action": tool_call["args"].get("action"),
+                    "status_code": None,
+                    "body": "",
+                    "error": "ToolNotFound",
+                }
+                logger.error("tool %s falhou: %r", tool_call["name"], diagnostic)
+                tool_messages.append(
+                    ToolMessage(
+                        content="Tool não encontrada",
+                        tool_call_id=tool_call["id"],
+                        name=tool_call["name"],
+                    )
+                )
+                diagnostics.append(diagnostic)
+                continue
+            try:
+                content = await tool.ainvoke(tool_call["args"])
+                tool_messages.append(
+                    ToolMessage(
+                        content=str(content),
+                        tool_call_id=tool_call["id"],
+                        name=tool_call["name"],
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 — diagnóstico, não crash do grafo
+                diagnostic = {
+                    "tool": tool_call["name"],
+                    "entity_id": tool_call["args"].get("entity_id"),
+                    "action": tool_call["args"].get("action"),
+                    "status_code": getattr(getattr(exc, "response", None), "status_code", None),
+                    "body": (getattr(getattr(exc, "response", None), "text", None) or "")[:500],
+                    "error": type(exc).__name__,
+                }
+                logger.error("tool %s falhou: %r", tool_call["name"], diagnostic)
+                tool_messages.append(
+                    ToolMessage(
+                        content=_FALLBACK,
+                        tool_call_id=tool_call["id"],
+                        name=tool_call["name"],
+                    )
+                )
+                diagnostics.append(diagnostic)
+
+        return {"messages": tool_messages, "tool_diagnostics": diagnostics}
+
+    return tool_node
 
 
 def route_tools(state: AgentState) -> str:
