@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Protocol
 
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 
@@ -21,6 +21,28 @@ logger = logging.getLogger("uvicorn.error")
 # Alias de tipo para os nós do grafo. Nós devolvem estado parcial (reducer
 # ``add_messages``/sobrescrita mesclam no estado completo).
 Node = Callable[[AgentState], Awaitable[dict[str, Any]]]
+
+# Catálogo de dispositivos injetado pelo lifespan no boot. ``None`` ⇒ ausente
+# (testes sem warm-up, ou boot sem catálogo): o chatbot_node simplesmente não
+# injeta a SystemMessage de catálogo — comportamento pré-catálogo.
+_CATALOG: DeviceCatalogLike | None = None
+
+
+class DeviceCatalogLike(Protocol):
+    """Contrato mínimo do catálogo que o grafo consome (contexto p/ o LLM)."""
+
+    def as_context(self) -> str: ...
+
+
+def set_catalog(catalog: DeviceCatalogLike | None) -> None:
+    """Injeta o catálogo (lifespan). ``None`` reseta (testes)."""
+    global _CATALOG
+    _CATALOG = catalog
+
+
+def get_catalog() -> DeviceCatalogLike | None:
+    """Acesso ao catálogo injetado (factory-style p/ monkeypatch em testes)."""
+    return _CATALOG
 
 
 def content_to_text(content: Any) -> str:
@@ -49,12 +71,21 @@ def content_to_text(content: Any) -> str:
     return str(content)
 
 
+_LLM_FALLBACK = "Desculpe, tive um problema para processar agora. Tente de novo em um instante."
+
+
 async def chatbot_node(state: AgentState) -> dict[str, Any]:
     """Invoca o motor cognitivo com tools e system prompt injetados.
 
     O system prompt varia por canal: ``SYSTEM_PROMPT_TELEGRAM`` quando
     ``source=="telegram"`` (permite Markdown/respostas mais longas),
     ``SYSTEM_PROMPT`` caso contrário (voz, texto plano falável).
+
+    Robustez: exceções do motor cognitivo (timeout do Ollama local, erro de
+    rede, sobrecarga) são capturadas aqui — logadas e convertidas em uma
+    ``AIMessage`` amigável + ``error`` no estado. Sem isso, qualquer falha do
+    LLM propagaria e viraria 500 no endpoint /chat. O grafo segue para
+    ``speak``/``telegram_end`` e o usuário ouve/lê o erro natural.
     """
     llm = get_llm()
     llm_with_tools = llm.bind_tools(ALL_TOOLS)
@@ -63,8 +94,29 @@ async def chatbot_node(state: AgentState) -> dict[str, Any]:
     is_telegram = isinstance(source, str) and source.lower() == "telegram"
     prompt = SYSTEM_PROMPT_TELEGRAM if is_telegram else SYSTEM_PROMPT
 
-    messages: list[BaseMessage] = [SystemMessage(content=prompt), *state["messages"]]
-    response = await llm_with_tools.ainvoke(messages)
+    messages: list[BaseMessage] = [SystemMessage(content=prompt)]
+    # Catálogo de dispositivos: injetado como SystemMessage extra quando
+    # populado, para o LLM escolher o entity_id correto ao chamar
+    # control_device. Vazio/ausente ⇒ omitido (sem regressão).
+    #
+    # Omitido na 2ª chamada do turno (pós-tool): se há ToolMessage no histórico,
+    # o dispositivo já foi resolvido e o LLM só formata a resposta — reenviar o
+    # catálogo dobra o custo do prompt no caminho crítico (controle de
+    # dispositivo) e empurra o TTFB de um LLM local (Ollama CPU) além do
+    # timeout. Halve o custo sem perder cobertura.
+    catalog = get_catalog()
+    has_tool_result = any(isinstance(m, ToolMessage) for m in state.get("messages", []))
+    if catalog is not None and not has_tool_result:
+        context = catalog.as_context()
+        if context:
+            messages.append(SystemMessage(content=context))
+    messages.extend(state["messages"])
+
+    try:
+        response = await llm_with_tools.ainvoke(messages)
+    except Exception as exc:  # noqa: BLE001 — não derrubar o /chat em falha do LLM
+        logger.error("chatbot_node: motor cognitivo falhou: %s: %s", type(exc).__name__, exc)
+        return {"messages": [AIMessage(content=_LLM_FALLBACK)], "error": _LLM_FALLBACK}
 
     ai_message = response if isinstance(response, BaseMessage) else AIMessage(content=str(response))
 

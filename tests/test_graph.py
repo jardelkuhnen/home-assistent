@@ -264,6 +264,179 @@ async def test_chatbot_node_selects_voice_prompt_by_default(
     assert messages[0].content == SYSTEM_PROMPT
 
 
+async def test_chatbot_node_injects_catalog_context(
+    test_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    """chatbot_node injeta o catálogo de dispositivos como SystemMessage após o prompt."""
+
+    class _StubCatalog:
+        def as_context(self) -> str:
+            return "Dispositivos disponíveis:\n- Principal Sala (switch.principal_sala)"
+
+    captured: dict[str, object] = {}
+
+    class _Bound:
+        async def ainvoke(self, messages, config=None, **kwargs):  # noqa: ANN001, ARG002
+            captured["messages"] = messages
+            return AIMessage(content="ok")
+
+    class _LLM:
+        def bind_tools(self, tools, **kwargs):  # noqa: ANN001, ARG002
+            return _Bound()
+
+    monkeypatch.setattr("src.graph.nodes.get_llm", lambda: _LLM())
+    monkeypatch.setattr("src.graph.nodes.get_catalog", lambda: _StubCatalog())
+    state: AgentState = {
+        "messages": [HumanMessage(content="ligar principal sala")],
+        "spoken": False,
+        "error": None,
+        "source": None,
+        "session_id": None,
+    }
+    await chatbot_node(state)
+    messages = list(captured["messages"])  # type: ignore[arg-type]
+    # [0]=prompt de voz, [1]=catálogo, [2]=HumanMessage.
+    assert isinstance(messages[1], SystemMessage)
+    assert "switch.principal_sala" in messages[1].content
+    assert "Principal Sala" in messages[1].content
+
+
+async def test_chatbot_node_omits_catalog_when_empty(
+    test_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    """Catálogo vazio (HA fora no boot) → não injeta SystemMessage de catálogo."""
+
+    class _StubCatalog:
+        def as_context(self) -> str:
+            return ""
+
+    captured: dict[str, object] = {}
+
+    class _Bound:
+        async def ainvoke(self, messages, config=None, **kwargs):  # noqa: ANN001, ARG002
+            captured["messages"] = messages
+            return AIMessage(content="ok")
+
+    class _LLM:
+        def bind_tools(self, tools, **kwargs):  # noqa: ANN001, ARG002
+            return _Bound()
+
+    monkeypatch.setattr("src.graph.nodes.get_llm", lambda: _LLM())
+    monkeypatch.setattr("src.graph.nodes.get_catalog", lambda: _StubCatalog())
+    state: AgentState = {
+        "messages": [HumanMessage(content="oi")],
+        "spoken": False,
+        "error": None,
+        "source": None,
+        "session_id": None,
+    }
+    await chatbot_node(state)
+    messages = list(captured["messages"])  # type: ignore[arg-type]
+    # Sem catálogo: [0]=prompt, [1]=HumanMessage (sem SystemMessage extra).
+    assert isinstance(messages[0], SystemMessage)
+    assert not isinstance(messages[1], SystemMessage)
+
+
+async def test_chatbot_node_handles_llm_timeout_gracefully(
+    test_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    """LLM timeout/erro → chatbot_node devolve AIMessage amigável, não propaga.
+
+    Regressão de robusteza: antes, qualquer exceção do motor cognitivo
+    (timeout do Ollama, erro de rede) propagava sem tratamento e virava 500
+    no endpoint /chat. Agora o nó captura, loga e devolve uma AIMessage de
+    fallback — o grafo segue para speak/telegram_end e o usuário ouve/leve
+    um erro natural em vez de 500.
+    """
+
+    class _FailingBound:
+        async def ainvoke(self, messages, config=None, **kwargs):  # noqa: ANN001, ARG002
+            raise httpx.ReadTimeout("ollama demorou")
+
+    class _LLM:
+        def bind_tools(self, tools, **kwargs):  # noqa: ANN001, ARG002
+            return _FailingBound()
+
+    monkeypatch.setattr("src.graph.nodes.get_llm", lambda: _LLM())
+    state: AgentState = {
+        "messages": [HumanMessage(content="ligar luz")],
+        "spoken": False,
+        "error": None,
+        "source": None,
+        "session_id": None,
+    }
+    result = await chatbot_node(state)
+    # Não propagou: devolveu estado com uma AIMessage amigável.
+    assert "messages" in result
+    msg = result["messages"][0]
+    assert isinstance(msg, AIMessage)
+    assert msg.content  # não vazio
+    # Sinaliza erro no estado p/ o endpoint registrar (sem virar 500).
+    assert result.get("error") is not None
+
+
+async def test_chatbot_node_skips_catalog_after_tool_call(
+    test_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    """Pós-tool call (há ToolMessage) → catálogo NÃO é reenviado ao LLM.
+
+    O catálogo só é necessário para a decisão de qual entity_id acionar (1ª
+    chamada do turno). Após o tool_node resolver o dispositivo, a 2ª chamada
+    só formata a resposta — reenviar o catálogo dobra o custo do prompt no
+    caminho crítico (controle de dispositivo) e empurra o TTFB do Ollama
+    local além do timeout. Pular aqui halve o custo sem perder cobertura.
+    """
+
+    class _StubCatalog:
+        def as_context(self) -> str:
+            return "Dispositivos:\n- Principal Sala (switch.principal_sala)"
+
+    captured: dict[str, object] = {}
+
+    class _Bound:
+        async def ainvoke(self, messages, config=None, **kwargs):  # noqa: ANN001, ARG002
+            captured["messages"] = messages
+            return AIMessage(content="Liguei.")
+
+    class _LLM:
+        def bind_tools(self, tools, **kwargs):  # noqa: ANN001, ARG002
+            return _Bound()
+
+    monkeypatch.setattr("src.graph.nodes.get_llm", lambda: _LLM())
+    monkeypatch.setattr("src.graph.nodes.get_catalog", lambda: _StubCatalog())
+    # Estado pós-tool: HumanMessage -> AIMessage(tool_call) -> ToolMessage.
+    state: AgentState = {
+        "messages": [
+            HumanMessage(content="ligar principal sala"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "control_device",
+                        "args": {"action": "on", "entity_id": "switch.principal_sala"},
+                        "id": "c1",
+                    }
+                ],
+            ),
+            ToolMessage(
+                content="Liguei o Principal Sala.", tool_call_id="c1", name="control_device"
+            ),
+        ],
+        "spoken": False,
+        "error": None,
+        "source": None,
+        "session_id": None,
+    }
+    await chatbot_node(state)
+    messages = list(captured["messages"])  # type: ignore[arg-type]
+    # [0]=prompt de voz, [1]=HumanMessage (catálogo OMITIDO pós-tool).
+    assert isinstance(messages[0], SystemMessage)
+    assert not isinstance(messages[1], SystemMessage)
+    assert "switch.principal_sala" not in "".join(
+        str(getattr(m, "content", "")) for m in messages if isinstance(m, SystemMessage)
+    )
+
+
 def test_build_graph_compiles(test_settings: Settings) -> None:  # type: ignore[no-untyped-def]
     from src.graph import build_graph
 

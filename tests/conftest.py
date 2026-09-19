@@ -33,6 +33,25 @@ def reset_settings_cache() -> Iterator[None]:
     get_settings.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def reset_catalog_globals() -> Iterator[None]:
+    """Reseta os globais de catálogo (tool + grafo) entre testes.
+
+    O lifespan do ``api.py`` injeta o catálogo em ``src.tools.home`` e
+    ``src.graph.nodes`` via ``set_catalog``. Sem reset, um teste que sobe o
+    TestClient (lifespan real) vazaria o catálogo para testes posteriores
+    que não o monkeypatch.
+    """
+    from src.graph import nodes as nodes_mod
+    from src.tools import home as home_mod
+
+    home_mod.set_catalog(None)
+    nodes_mod.set_catalog(None)
+    yield
+    home_mod.set_catalog(None)
+    nodes_mod.set_catalog(None)
+
+
 @pytest.fixture
 def test_env(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     """Popula o ambiente com variáveis de teste determinísticas."""

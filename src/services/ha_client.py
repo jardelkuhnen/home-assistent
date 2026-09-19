@@ -79,6 +79,19 @@ class HomeAssistantClient:
             return result
         return {"state": result}
 
+    async def list_states(self) -> list[dict[str, Any]]:
+        """GET ``/api/states`` — todos os entidades do HA.
+
+        Usado pelo ``DeviceCatalog`` para montar o catálogo de dispositivos
+        acionáveis. Propaga ``httpx.HTTPError`` em falha — o catalog trata.
+        """
+        response = await self._client.get("/api/states")
+        response.raise_for_status()
+        result: Any = response.json()
+        if isinstance(result, list):
+            return [item for item in result if isinstance(item, dict)]
+        return []
+
     async def speak(self, text: str) -> dict[str, Any]:
         """Síntese de voz via ``notify.alexa_media``.
 
