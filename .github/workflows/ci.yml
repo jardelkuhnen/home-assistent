@@ -72,7 +72,7 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
-      - run: pip install -e ".[dev]" pip-audit
+      - run: pip install -e ".[dev]" pip-audit "setuptools>=83.0.0"
       - run: pip-audit
 
   secret-scan:
