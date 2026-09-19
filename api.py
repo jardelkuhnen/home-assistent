@@ -79,10 +79,25 @@ def events_from_node_update(
 
     if node_name == "tools":
         tool_names = _tool_names_from_update(update)
-        return [
+        events = [
             timeline_event("Tool Agent", "Tool executada", f"tool: {tool_name}")
             for tool_name in tool_names
-        ] or [timeline_event("Tool Agent", "Nó de tools executado")]
+        ]
+        # Diagnóstico do HA (nó de tool custom): um evento por falha, além da
+        # timeline de "Tool executada" mantida para sucesso.
+        for diagnostic in update.get("tool_diagnostics", []):
+            events.append(
+                timeline_event(
+                    "Tool Agent",
+                    "Erro na tool",
+                    (
+                        f"tool: {diagnostic['tool']} | {diagnostic['tool']}"
+                        f" {diagnostic['action']} {diagnostic['entity_id']}"
+                        f" -> {diagnostic['status_code']} {diagnostic['body'][:120]}"
+                    ),
+                )
+            )
+        return events or [timeline_event("Tool Agent", "Nó de tools executado")]
 
     if node_name == "speak":
         if update.get("spoken") is True:
@@ -121,10 +136,32 @@ class Metadata(BaseModel):
     session_id: str | None = None
 
 
+class ToolDiagnostic(BaseModel):
+    """Diagnóstico do retorno do Home Assistant em uma execução de tool.
+
+    Preenchido pelo nó de tool custom quando a tool falha (ex. erro HTTP do
+    HA): status HTTP + body + entity/action. É observabilidade de máquina —
+    não vaza para a fala (``reply``) nem para a Alexa.
+    """
+
+    tool: str
+    entity_id: str | None = None
+    action: str | None = None
+    status_code: int | None = None
+    body: str = ""
+    error: str = ""
+
+
 class ResponseMetadata(BaseModel):
-    """Metadados da resposta — ferramentas acionadas no turno."""
+    """Metadados da resposta — ferramentas acionadas no turno.
+
+    * ``tools_used`` — nomes das tools executadas no turno.
+    * ``tool_diagnostics`` — diagnóstico do HA por tool que falhou (default
+      ``[]``; campo aditivo, retrocompatível).
+    """
 
     tools_used: list[str] = []
+    tool_diagnostics: list[ToolDiagnostic] = []
 
 
 class ChatRequest(BaseModel):
@@ -210,12 +247,16 @@ async def chat(
     result["messages"] = list(initial_state["messages"])
     timeline: list[TimelineEvent] = []
     tools_used: set[str] = set()
+    # Diagnóstico bruto chega como list[dict] no update do nó ``tools``
+    # (sempre presente, ``[]`` em sucesso/no-op); converte ao montar a resposta.
+    tool_diagnostics_accum: list[dict[str, Any]] = []
 
     async for updates in graph.astream(initial_state, stream_mode="updates"):
         for node_name, update in updates.items():
             timeline.extend(events_from_node_update(node_name, update, settings))
             if node_name == "tools":
                 tools_used.update(_tool_names_from_update(update))
+                tool_diagnostics_accum.extend(update.get("tool_diagnostics", []))
             if "messages" in update:
                 result["messages"].extend(update["messages"])
             for field in ("spoken", "error", "source"):
@@ -237,7 +278,12 @@ async def chat(
         reply=reply,
         spoken=spoken,
         source=final_source,
-        metadata=ResponseMetadata(tools_used=sorted(tools_used)),
+        metadata=ResponseMetadata(
+            tools_used=sorted(tools_used),
+            tool_diagnostics=[
+                ToolDiagnostic(**diagnostic) for diagnostic in tool_diagnostics_accum
+            ],
+        ),
         error=error,
     )
 
