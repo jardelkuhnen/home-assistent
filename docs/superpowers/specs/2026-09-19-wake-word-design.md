@@ -55,10 +55,12 @@ fecha o stream → retorna os bytes
 A lógica de estados vive em uma função pura:
 
 ```python
-def _listen(blocks: Iterable[np.ndarray],
-            wake_score: Callable[[np.ndarray], float],
-            is_speech: Callable[[np.ndarray], bool],
-            settings: Settings) -> bytes: ...
+def _listen(
+    blocks: Iterable[np.ndarray],
+    wake_score: Callable[[np.ndarray], float],
+    is_speech: Callable[[np.ndarray], bool],
+    settings: Settings,
+) -> bytes: ...
 ```
 
 `capture_audio` só faz a cola: abre o `InputStream`, monta os detectores reais
