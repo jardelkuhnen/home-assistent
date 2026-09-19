@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+import respx
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from src.config import Settings
-from src.graph.nodes import build_speak_node, chatbot_node, content_to_text, route_tools
+from src.graph.nodes import (
+    build_speak_node,
+    build_tool_node,
+    chatbot_node,
+    content_to_text,
+    route_tools,
+)
 from src.graph.prompt import SYSTEM_PROMPT, SYSTEM_PROMPT_TELEGRAM
 from src.graph.state import AgentState
 from src.services.ha_client import HomeAssistantClient
+from src.tools.home import _FALLBACK
+
+_HA_URL = "http://homeassistant.local:8123"
 
 
 class _FakeHA(HomeAssistantClient):
@@ -84,6 +95,104 @@ def test_route_tools_telegram_with_tool_calls_still_tools() -> None:
     ai = AIMessage(content="", tool_calls=[{"name": "get_weather", "args": {}, "id": "1"}])
     state = {"messages": [ai], "spoken": False, "error": None, "source": "telegram"}
     assert route_tools(state) == "tools"
+
+
+def _state_with_control_device_call(action: str, entity_id: str) -> AgentState:
+    """Estado com uma AIMessage pendendo ``control_device`` (última mensagem)."""
+    ai = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "control_device",
+                "args": {"action": action, "entity_id": entity_id},
+                "id": "call_1",
+            }
+        ],
+    )
+    return {"messages": [ai], "spoken": False, "error": None}
+
+
+async def test_tool_node_success_returns_tool_message(
+    test_settings: Settings,
+) -> None:  # type: ignore[no-untyped-def]
+    """Tool call bem-sucedida → ToolMessage com o retorno amigável, sem diagnóstico."""
+    node = build_tool_node()
+    with respx.mock(base_url=_HA_URL) as router:
+        router.post("/api/services/light/turn_on").mock(return_value=httpx.Response(200, json=[]))
+        result = await node(_state_with_control_device_call("on", "light.luz_sala"))
+    messages = result["messages"]
+    assert len(messages) == 1
+    assert isinstance(messages[0], ToolMessage)
+    assert messages[0].name == "control_device"
+    assert messages[0].tool_call_id == "call_1"
+    assert messages[0].content == "Liguei o luz da sala."
+    assert result["tool_diagnostics"] == []
+
+
+async def test_tool_node_failure_returns_fallback_and_diagnostic(
+    test_settings: Settings,
+) -> None:  # type: ignore[no-untyped-def]
+    """Erro HTTP do HA → ToolMessage _FALLBACK + diagnóstico no estado."""
+    node = build_tool_node()
+    with respx.mock(base_url=_HA_URL) as router:
+        router.post("/api/services/light/turn_on").mock(
+            return_value=httpx.Response(404, text="entity not found")
+        )
+        result = await node(_state_with_control_device_call("on", "light.luz_sala"))
+    messages = result["messages"]
+    assert len(messages) == 1
+    assert isinstance(messages[0], ToolMessage)
+    assert messages[0].content == _FALLBACK
+    diagnostics = result["tool_diagnostics"]
+    assert len(diagnostics) == 1
+    diagnostic = diagnostics[0]
+    assert diagnostic["tool"] == "control_device"
+    assert diagnostic["entity_id"] == "light.luz_sala"
+    assert diagnostic["action"] == "on"
+    assert diagnostic["status_code"] == 404
+    assert "entity not found" in diagnostic["body"]
+    assert diagnostic["error"] == "HTTPStatusError"
+
+
+async def test_tool_node_without_pending_tool_calls_returns_empty(
+    test_settings: Settings,
+) -> None:  # type: ignore[no-untyped-def]
+    """Última mensagem sem tool calls → nó não faz nada ({"messages": []})."""
+    node = build_tool_node()
+    state: AgentState = {
+        "messages": [AIMessage(content="pronto")],
+        "spoken": False,
+        "error": None,
+    }
+    result = await node(state)
+    assert result == {"messages": []}
+
+
+async def test_tool_node_unknown_tool_returns_toolnotfound_diagnostic(
+    test_settings: Settings,
+) -> None:  # type: ignore[no-untyped-def]
+    """Tool inexistente em ALL_TOOLS → ToolMessage amigável + diagnostic ToolNotFound."""
+    node = build_tool_node()
+    ai = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "nope_device",
+                "args": {"action": "on", "entity_id": "light.luz_sala"},
+                "id": "call_9",
+            }
+        ],
+    )
+    state: AgentState = {"messages": [ai], "spoken": False, "error": None}
+    result = await node(state)
+    messages = result["messages"]
+    assert len(messages) == 1
+    assert isinstance(messages[0], ToolMessage)
+    assert messages[0].content == "Tool não encontrada"
+    diagnostics = result["tool_diagnostics"]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["tool"] == "nope_device"
+    assert diagnostics[0]["error"] == "ToolNotFound"
 
 
 def test_system_prompt_has_no_markdown() -> None:
