@@ -32,6 +32,9 @@ env/
 whisper-models/
 models/
 
+# --- Dados locais (banco SQLite do dashboard) ---
+data/
+
 # --- IDE / SO ---
 .vscode/
 .idea/

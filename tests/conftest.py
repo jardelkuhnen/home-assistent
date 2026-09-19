@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -53,11 +54,16 @@ def reset_catalog_globals() -> Iterator[None]:
 
 
 @pytest.fixture
-def test_env(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
-    """Popula o ambiente com variáveis de teste determinísticas."""
-    for key, value in _ENV.items():
+def test_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, str]:
+    """Popula o ambiente com variáveis de teste determinísticas.
+
+    ``DASHBOARD_DB_PATH`` aponta para um diretório temporário: o lifespan do
+    ``api.py`` abre o banco de turnos e os testes não podem criar ``data/runs.db``.
+    """
+    env = {**_ENV, "DASHBOARD_DB_PATH": str(tmp_path / "runs.db")}
+    for key, value in env.items():
         monkeypatch.setenv(key, value)
-    return _ENV
+    return env
 
 
 @pytest.fixture

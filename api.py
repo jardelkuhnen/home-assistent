@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -17,12 +18,14 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
-from src.config import Settings, get_settings
+from src.config import Settings, configured_llm_model, get_settings
+from src.dashboard.routes import router as dashboard_router
 from src.graph import build_graph
 from src.graph.nodes import content_to_text
 from src.graph.nodes import set_catalog as set_graph_catalog
 from src.services.catalog import DeviceCatalog
 from src.services.ha_client import HomeAssistantClient
+from src.services.runs import RunStore
 from src.tools.home import set_catalog as set_tool_catalog
 
 # Uvicorn configura este logger para o console; usar o logger do módulo faria
@@ -37,15 +40,6 @@ class TimelineEvent(TypedDict):
     agent: str
     action: str
     details: str | None
-
-
-def configured_llm_model(settings: Settings) -> str:
-    """Retorna o nome do modelo ativo, para logs de inicialização."""
-    if settings.llm_provider == "ollama":
-        return settings.ollama_model
-    if settings.llm_provider == "gemini":
-        return "gemini-3.5-flash"
-    return "gpt-4o-mini"
 
 
 def timeline_event(agent: str, action: str, details: str | None = None) -> TimelineEvent:
@@ -70,6 +64,20 @@ def _tool_names_from_update(update: dict[str, Any]) -> list[str]:
         for message in update.get("messages", [])
         if isinstance((name := getattr(message, "name", None)), str) and name
     ]
+
+
+def _tool_errors_from_update(update: dict[str, Any]) -> dict[str, str]:
+    """Erro por tool (casado pelo nome) a partir de ``tool_diagnostics``.
+
+    Guarda só ``status_code`` e o tipo do erro — nunca o ``body`` do HA.
+    """
+    return {
+        diagnostic["tool"]: " ".join(
+            str(part) for part in (diagnostic.get("status_code"), diagnostic.get("error")) if part
+        )
+        or "erro"
+        for diagnostic in update.get("tool_diagnostics", [])
+    }
 
 
 def events_from_node_update(
@@ -215,6 +223,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     set_graph_catalog(catalog)
     set_tool_catalog(catalog)
     app.state.graph = build_graph(ha_client)
+    runs = RunStore(settings.dashboard_db_path)
+    await runs.init()
+    app.state.runs = runs
+    app.state.started_at = time.monotonic()
     try:
         yield
     finally:
@@ -222,6 +234,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="home-assistent-brain", lifespan=lifespan)
+app.include_router(dashboard_router)
 
 
 @app.get("/health")
@@ -264,17 +277,35 @@ async def chat(
     # (sempre presente, ``[]`` em sucesso/no-op); converte ao montar a resposta.
     tool_diagnostics_accum: list[dict[str, Any]] = []
 
-    async for updates in graph.astream(initial_state, stream_mode="updates"):
-        for node_name, update in updates.items():
-            timeline.extend(events_from_node_update(node_name, update, settings))
-            if node_name == "tools":
-                tools_used.update(_tool_names_from_update(update))
-                tool_diagnostics_accum.extend(update.get("tool_diagnostics", []))
-            if "messages" in update:
-                result["messages"].extend(update["messages"])
-            for field in ("spoken", "error", "source"):
-                if field in update:
-                    result[field] = update[field]
+    runs: RunStore = app.state.runs
+    run_id = runs.start(source, session_id)
+    last_update_at = time.monotonic()
+    try:
+        async for updates in graph.astream(initial_state, stream_mode="updates"):
+            # O astream só emite após o nó terminar: a duração é o intervalo
+            # entre updates consecutivos (o primeiro conta desde o start).
+            now = time.monotonic()
+            duration_ms = int((now - last_update_at) * 1000)
+            last_update_at = now
+            for node_name, update in updates.items():
+                timeline.extend(events_from_node_update(node_name, update, settings))
+                tool_names = _tool_names_from_update(update) if node_name == "tools" else []
+                runs.record_node(
+                    run_id, node_name, duration_ms, tool_names, _tool_errors_from_update(update)
+                )
+                if node_name == "tools":
+                    tools_used.update(tool_names)
+                    tool_diagnostics_accum.extend(update.get("tool_diagnostics", []))
+                if "messages" in update:
+                    result["messages"].extend(update["messages"])
+                for field in ("spoken", "error", "source"):
+                    if field in update:
+                        result[field] = update[field]
+    except BaseException as exc:
+        # BaseException: um cliente que desconecta cancela a task, e o turno
+        # não pode ficar "rodando" para sempre no dashboard.
+        await runs.finish(run_id, "error", False, type(exc).__name__)
+        raise
 
     logger.info("%s", format_timeline_for_terminal(timeline))
 
@@ -286,6 +317,7 @@ async def chat(
 
     spoken = bool(result.get("spoken", False))
     error = result.get("error")
+    await runs.finish(run_id, "error" if error else "ok", spoken, error)
     final_source = str(result.get("source") or source)
     return ChatResponse(
         reply=reply,

@@ -10,6 +10,7 @@ Centraliza:
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated, Any, Literal, Protocol, runtime_checkable
 
 from pydantic import AnyHttpUrl, SecretStr, field_validator
@@ -97,6 +98,11 @@ class Settings(BaseSettings):
     # ``field_validator`` abaixo, que faz o parsing por vírgula.
     allowed_users: Annotated[list[int], NoDecode] = []
 
+    # --- Dashboard de observabilidade (GET /dashboard) ---
+    # Banco SQLite com os metadados dos turnos do /chat. Tem default, então não
+    # quebra .env existente (extra="forbid"); o diretório é criado na abertura.
+    dashboard_db_path: Path = Path("data/runs.db")
+
     @field_validator("allowed_users", mode="before")
     @classmethod
     def _parse_allowed_users(cls, v: Any) -> Any:
@@ -118,6 +124,15 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Retorna a instância singleton de ``Settings``."""
     return Settings()
+
+
+def configured_llm_model(settings: Settings) -> str:
+    """Retorna o nome do modelo ativo (logs de inicialização e dashboard)."""
+    if settings.llm_provider == "ollama":
+        return settings.ollama_model
+    if settings.llm_provider == "gemini":
+        return "gemini-3.5-flash"
+    return "gpt-4o-mini"
 
 
 @runtime_checkable
