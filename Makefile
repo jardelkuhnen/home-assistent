@@ -18,6 +18,8 @@ setup: system-deps venv install
 install: venv
 	$(VENV_BIN)/python -m pip install --upgrade pip
 	$(VENV_BIN)/pip install -e ".[dev]"
+	# openwakeword puxa tflite-runtime (sem wheel p/ Python >=3.12 no Linux): só ONNX, sem deps.
+	$(VENV_BIN)/pip install --no-deps "openwakeword>=0.6.0,<0.7"
 
 # Create the virtualenv if it doesn't exist.
 venv:
@@ -47,6 +49,7 @@ format:
 
 lint:
 	$(VENV_BIN)/ruff check .
+	$(VENV_BIN)/ruff format --check .
 
 typecheck:
 	$(VENV_BIN)/mypy --strict src

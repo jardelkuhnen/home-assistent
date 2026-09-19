@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import queue
+import sys
+import threading
+import types
+from collections.abc import Iterator
+from typing import Any
 
 import httpx
+import numpy as np
 import pytest
 import respx
 
 from satelite import send_to_brain, transcribe
+from src.config import Settings
 
 
 @pytest.mark.asyncio
@@ -98,21 +106,6 @@ def test_transcribe_returns_string(
     assert result == "ligar a luz da sala"
 
 
-def test_is_shift_detects_all_variants() -> None:
-    """_is_shift reconhece shift, shift_l e shift_r (pynput Key)."""
-    from satelite import _is_shift
-
-    class _K:
-        def __init__(self, name: str | None) -> None:
-            self.name = name
-
-    assert _is_shift(_K("shift")) is True
-    assert _is_shift(_K("shift_l")) is True
-    assert _is_shift(_K("shift_r")) is True
-    assert _is_shift(_K("enter")) is False
-    assert _is_shift(_K(None)) is False
-
-
 async def test_with_spinner_runs_coro_and_returns_result(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -128,3 +121,447 @@ async def test_with_spinner_runs_coro_and_returns_result(
     # A animação é limpa ao final; não deve restar o caractere giratório.
     out = capsys.readouterr().err
     assert "⠋" not in out or out.count("\r") >= 1  # sobrescreveu a linha
+
+
+# --- _listen: máquina de estados ESCUTANDO → GRAVANDO (sem hardware) -----------
+
+_BLOCK = 1_280
+_SILENCE, _WAKE, _SPEECH = 0, 1, 2
+
+
+def _blk(value: int) -> np.ndarray:
+    return np.full(_BLOCK, value, dtype=np.int16)
+
+
+def _fake_wake_score(block: np.ndarray) -> float:
+    return 1.0 if block[0] == _WAKE else 0.0
+
+
+def _fake_is_speech(block: np.ndarray) -> bool:
+    return bool(block[0] == _SPEECH)
+
+
+@pytest.fixture
+def listen_settings(test_settings: Settings) -> Settings:
+    """Durações pequenas: 3 blocos de silêncio, 5 sem fala, teto de 10 blocos (bloco = 80 ms)."""
+    return test_settings.model_copy(
+        update={"end_silence_s": 0.24, "no_speech_timeout_s": 0.4, "max_record_s": 0.8}
+    )
+
+
+def test_listen_returns_only_audio_after_wake_and_stops_at_silence(
+    listen_settings: Settings,
+) -> None:
+    from satelite import _listen
+
+    blocks = iter(
+        [_blk(_SPEECH), _blk(_SPEECH), _blk(_WAKE)]  # fala antes do wake: ignorada
+        + [_blk(_SPEECH)] * 3
+        + [_blk(_SILENCE)] * 3  # 3 blocos de silêncio → fim
+        + [_blk(7)]  # não pode ser consumido
+    )
+
+    audio = _listen(blocks, _fake_wake_score, _fake_is_speech, listen_settings)
+
+    samples = np.frombuffer(audio, dtype=np.int16)
+    assert len(samples) == 6 * _BLOCK
+    assert (samples[: 3 * _BLOCK] == _SPEECH).all()
+    assert (samples[3 * _BLOCK :] == _SILENCE).all()
+    assert next(blocks)[0] == 7  # parou de consumir o stream assim que terminou
+
+
+def test_listen_short_pause_does_not_end_recording(listen_settings: Settings) -> None:
+    from satelite import _listen
+
+    blocks = [
+        _blk(_WAKE),
+        _blk(_SPEECH),
+        _blk(_SILENCE),
+        _blk(_SILENCE),  # pausa de 2 blocos (< 3): não encerra
+        _blk(_SPEECH),
+        _blk(_SILENCE),
+        _blk(_SILENCE),
+        _blk(_SILENCE),
+    ]
+
+    audio = _listen(iter(blocks), _fake_wake_score, _fake_is_speech, listen_settings)
+
+    assert len(audio) == 7 * _BLOCK * 2  # 7 blocos (tudo depois do wake), 2 bytes/amostra
+
+
+def test_listen_no_speech_after_wake_returns_empty(listen_settings: Settings) -> None:
+    from satelite import _listen
+
+    blocks = iter([_blk(_WAKE)] + [_blk(_SILENCE)] * 20 + [_blk(7)])
+
+    audio = _listen(blocks, _fake_wake_score, _fake_is_speech, listen_settings)
+
+    assert audio == b""
+    assert next(blocks)[0] != 7  # desistiu antes do fim do stream (após 5 blocos)
+
+
+def test_listen_caps_recording_at_max_record(listen_settings: Settings) -> None:
+    from satelite import _listen
+
+    blocks = iter([_blk(_WAKE)] + [_blk(_SPEECH)] * 50)
+
+    audio = _listen(blocks, _fake_wake_score, _fake_is_speech, listen_settings)
+
+    assert len(audio) == 10 * _BLOCK * 2  # max_record_s=0.8 → 10 blocos
+
+
+def test_listen_returns_empty_if_stream_ends_before_wake(listen_settings: Settings) -> None:
+    from satelite import _listen
+
+    blocks = iter([_blk(_SILENCE)] * 5 + [_blk(_SPEECH)] * 5)
+
+    assert _listen(blocks, _fake_wake_score, _fake_is_speech, listen_settings) == b""
+
+
+def test_listen_ignores_score_below_threshold(listen_settings: Settings) -> None:
+    from satelite import _listen
+
+    blocks = iter([_blk(_WAKE)] + [_blk(_SPEECH)] * 5)
+
+    # threshold default = 0.5; 0.49 não dispara.
+    assert _listen(blocks, lambda b: 0.49, _fake_is_speech, listen_settings) == b""
+
+
+@pytest.fixture(autouse=True)
+def _clear_model_caches() -> Iterator[None]:
+    """Os loaders de modelo têm lru_cache; isola os testes entre si (antes e depois)."""
+    import satelite
+
+    def clear() -> None:
+        satelite._load_whisper.cache_clear()
+        satelite._load_wake_model.cache_clear()
+        satelite._load_vad.cache_clear()
+        satelite._stop.clear()
+
+    clear()
+    yield
+    clear()
+
+
+# --- capture_audio: fiação com sounddevice e detectores falsos (sem hardware) --------
+
+
+def _tagged(value: int, tag: int) -> np.ndarray:
+    """Bloco do tipo ``value`` com a última amostra = ``tag``, para reconhecê-lo no áudio."""
+    block = _blk(value)
+    block[-1] = tag
+    return block
+
+
+class _FakeStream:
+    """InputStream falso: ao abrir, entrega ``audio.blocks`` chamando o callback recebido."""
+
+    def __init__(self, audio: _FakeAudio, kwargs: dict[str, Any]) -> None:
+        self.audio = audio
+        self.callback = kwargs.pop("callback")
+        audio.stream_kwargs = kwargs
+        audio.events.append("stream.init")
+
+    def __enter__(self) -> _FakeStream:
+        self.audio.events.append("stream.enter")
+        for block in self.audio.blocks:
+            self.callback(block.reshape(-1, 1), len(block), None, None)  # indata: (1280, 1)
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.audio.events.append("stream.exit")
+
+
+class _FakeWakeModel:
+    def __init__(self, audio: _FakeAudio) -> None:
+        self.audio = audio
+
+    def reset(self) -> None:
+        self.audio.events.append("wake.reset")
+
+    def predict(self, block: np.ndarray) -> dict[str, float]:
+        self.audio.wake_seen.append(block)
+        if self.audio.raise_in == "wake":
+            raise RuntimeError("boom")
+        return {self.audio.settings.wake_word_model: _fake_wake_score(block)}
+
+
+class _FakeVad:
+    def __init__(self, audio: _FakeAudio) -> None:
+        self.audio = audio
+
+    def reset_states(self) -> None:
+        self.audio.events.append("vad.reset_states")
+
+    def predict(self, block: np.ndarray, frame_size: int) -> float:
+        self.audio.vad_seen.append(block)
+        self.audio.vad_frame_sizes.append(frame_size)
+        if self.audio.raise_in == "vad":
+            raise RuntimeError("boom")
+        return self.audio.vad_scores.get(int(block[0]), 0.1)
+
+
+class _FakeAudio:
+    """Estado compartilhado dos falsos: o que entra (``blocks``) e o que foi observado."""
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.blocks: list[np.ndarray] = []
+        self.vad_scores: dict[int, float] = {_SPEECH: 0.9}  # tipo do bloco → score (senão 0.1)
+        self.raise_in: str | None = None  # "wake" ou "vad": o detector levanta ao ser chamado
+        self.events: list[str] = []
+        self.stream_kwargs: dict[str, Any] = {}
+        self.loaded_wake_names: list[str] = []
+        self.wake_seen: list[np.ndarray] = []
+        self.vad_seen: list[np.ndarray] = []
+        self.vad_frame_sizes: list[int] = []
+
+    def input_stream(self, **kwargs: Any) -> _FakeStream:
+        return _FakeStream(self, kwargs)
+
+    def load_wake_model(self, name: str) -> _FakeWakeModel:
+        self.loaded_wake_names.append(name)
+        return _FakeWakeModel(self)
+
+    def load_vad(self) -> _FakeVad:
+        return _FakeVad(self)
+
+
+@pytest.fixture
+def fake_audio(listen_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> _FakeAudio:
+    """Troca sounddevice e os loaders de modelo por falsos; nada toca mic nem modelos reais."""
+    import satelite
+
+    # Nome diferente do default: prova que o score é lido pela chave de settings.
+    audio = _FakeAudio(listen_settings.model_copy(update={"wake_word_model": "modelo_teste"}))
+    fake_sd = types.ModuleType("sounddevice")
+    fake_sd.InputStream = audio.input_stream  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sd)
+    monkeypatch.setattr(satelite, "_load_wake_model", audio.load_wake_model)
+    monkeypatch.setattr(satelite, "_load_vad", audio.load_vad)
+    return audio
+
+
+def test_capture_audio_returns_exact_audio_after_wake(fake_audio: _FakeAudio) -> None:
+    from satelite import capture_audio
+
+    fake_audio.blocks = [
+        _tagged(_SILENCE, 10),
+        _tagged(_WAKE, 11),  # dispara o wake word: não entra no áudio
+        _tagged(_SPEECH, 12),
+        _tagged(_SPEECH, 13),
+        _tagged(_SILENCE, 14),
+        _tagged(_SILENCE, 15),
+        _tagged(_SILENCE, 16),  # 3 blocos de silêncio → fim
+    ]
+
+    audio = capture_audio(fake_audio.settings)
+
+    assert audio == np.concatenate(fake_audio.blocks[2:]).tobytes()
+    # O callback entrega ao modelo blocos 1-D int16 (indata[:, 0]), não (1280, 1).
+    assert len(fake_audio.wake_seen) == 2  # o wake word para de ser consultado ao disparar
+    for block in fake_audio.wake_seen + fake_audio.vad_seen:
+        assert block.shape == (_BLOCK,)
+        assert block.dtype == np.int16
+
+
+def test_capture_audio_opens_16khz_mono_int16_stream_with_80ms_blocks(
+    fake_audio: _FakeAudio,
+) -> None:
+    from satelite import capture_audio
+
+    fake_audio.blocks = [_blk(_WAKE)] + [_blk(_SILENCE)] * 5  # falso positivo: sem fala
+
+    assert capture_audio(fake_audio.settings) == b""
+
+    assert fake_audio.stream_kwargs == {
+        "samplerate": 16000,
+        "channels": 1,
+        "dtype": "int16",
+        "blocksize": 1280,
+    }
+
+
+def test_capture_audio_resets_detectors_before_opening_stream(fake_audio: _FakeAudio) -> None:
+    from satelite import capture_audio
+
+    fake_audio.blocks = [_blk(_WAKE)] + [_blk(_SILENCE)] * 5
+
+    capture_audio(fake_audio.settings)
+
+    # Modelos vivem o processo inteiro: o estado da fala anterior não pode vazar para esta.
+    assert set(fake_audio.events[:2]) == {"wake.reset", "vad.reset_states"}
+    assert fake_audio.events[2:] == ["stream.init", "stream.enter", "stream.exit"]
+
+
+def test_capture_audio_reads_wake_score_by_configured_model_name(
+    fake_audio: _FakeAudio,
+) -> None:
+    from satelite import capture_audio
+
+    fake_audio.blocks = [_blk(_WAKE), _blk(_SPEECH)] + [_blk(_SILENCE)] * 3
+
+    # O falso só devolve {"modelo_teste": score}; outra chave levantaria KeyError.
+    assert len(capture_audio(fake_audio.settings)) == 4 * _BLOCK * 2
+    assert fake_audio.loaded_wake_names == ["modelo_teste"]
+
+
+def test_capture_audio_passes_vad_frame_size_that_divides_the_block(
+    fake_audio: _FakeAudio,
+) -> None:
+    from satelite import capture_audio
+
+    fake_audio.blocks = [_blk(_WAKE), _blk(_SPEECH)] + [_blk(_SILENCE)] * 3
+
+    capture_audio(fake_audio.settings)
+
+    assert fake_audio.vad_frame_sizes == [640] * 4
+    assert _BLOCK % 640 == 0
+
+
+@pytest.mark.parametrize(
+    ("vad_score", "expected_blocks"),
+    [(0.5, 4), (0.49, 0)],  # 1 de fala + 3 de silêncio; ou nada (fala não detectada)
+)
+def test_capture_audio_vad_score_at_threshold_counts_as_speech(
+    fake_audio: _FakeAudio, vad_score: float, expected_blocks: int
+) -> None:
+    from satelite import capture_audio
+
+    fake_audio.vad_scores = {_SPEECH: vad_score}
+    fake_audio.blocks = [_blk(_WAKE), _blk(_SPEECH)] + [_blk(_SILENCE)] * 4
+
+    audio = capture_audio(fake_audio.settings)
+
+    assert len(audio) == expected_blocks * _BLOCK * 2
+
+
+@pytest.mark.parametrize(
+    ("raise_in", "blocks"),
+    [("wake", [_blk(_SILENCE)]), ("vad", [_blk(_WAKE), _blk(_SPEECH)])],
+)
+def test_capture_audio_closes_stream_and_propagates_detector_error(
+    fake_audio: _FakeAudio, raise_in: str, blocks: list[np.ndarray]
+) -> None:
+    from satelite import capture_audio
+
+    fake_audio.raise_in = raise_in
+    fake_audio.blocks = blocks
+
+    with pytest.raises(RuntimeError, match="boom"):
+        capture_audio(fake_audio.settings)
+
+    assert fake_audio.events[-1] == "stream.exit"  # o microfone é solto mesmo com erro
+
+
+def test_transcribe_loads_whisper_model_only_once(
+    test_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Num loop, recarregar o WhisperModel a cada fala custaria segundos por comando."""
+    loads: list[str] = []
+
+    class _Segment:
+        text = "oi"
+
+    class _FakeModel:
+        def transcribe(self, audio, language="pt"):  # noqa: ANN001
+            return iter([_Segment()]), None
+
+    def fake_whisper(model, device, compute_type):  # noqa: ANN001
+        loads.append(model)
+        return _FakeModel()
+
+    import faster_whisper
+
+    monkeypatch.setattr(faster_whisper, "WhisperModel", fake_whisper)
+
+    audio = b"\x00\x00" * 1600
+    assert transcribe(audio) == "oi"
+    assert transcribe(audio) == "oi"
+    assert loads == ["tiny"]  # WHISPER_MODEL=tiny no ambiente de teste
+
+
+def test_drain_yields_until_stop_is_set() -> None:
+    from satelite import _drain
+
+    audio_q: queue.Queue[str] = queue.Queue()
+    stop = threading.Event()
+    audio_q.put("a")
+    audio_q.put("b")
+
+    it = _drain(audio_q, stop)
+    assert next(it) == "a"
+    stop.set()
+    with pytest.raises(StopIteration):
+        next(it)
+
+
+def test_drain_returns_when_stopped_while_queue_is_empty() -> None:
+    """Sem áudio na fila, o gerador não pode bloquear para sempre: precisa notar o stop."""
+    from satelite import _drain
+
+    audio_q: queue.Queue[str] = queue.Queue()
+    stop = threading.Event()
+    threading.Timer(0.05, stop.set).start()
+
+    assert list(_drain(audio_q, stop)) == []
+
+
+async def test_run_once_skips_transcription_when_no_audio(
+    test_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Falso positivo do wake word → capture_audio devolve b"": não chama Whisper nem Cérebro."""
+    import satelite
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise AssertionError("não deveria ser chamado com áudio vazio")
+
+    monkeypatch.setattr(satelite, "capture_audio", lambda *a, **k: b"")
+    monkeypatch.setattr(satelite, "transcribe", fail)
+    monkeypatch.setattr(satelite, "send_to_brain", fail)
+
+    await satelite.run_once()
+
+    assert "Nada capturado" in capsys.readouterr().err
+
+
+async def test_run_forever_sets_stop_when_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cancelar (Ctrl+C) tem de liberar a thread de captura via _stop."""
+    import satelite
+
+    started = asyncio.Event()
+
+    async def fake_run_once() -> None:
+        started.set()
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(satelite, "run_once", fake_run_once)
+
+    task = asyncio.create_task(satelite.run_forever())
+    await started.wait()
+    assert not satelite._stop.is_set()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert satelite._stop.is_set()
+
+
+async def test_run_forever_repeats_run_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    import satelite
+
+    calls = 0
+
+    async def fake_run_once() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise RuntimeError("fim do teste")
+
+    monkeypatch.setattr(satelite, "run_once", fake_run_once)
+
+    with pytest.raises(RuntimeError, match="fim do teste"):
+        await satelite.run_forever()
+
+    assert calls == 3

@@ -68,6 +68,20 @@ class Settings(BaseSettings):
     # --- STT (faster-whisper) ---
     whisper_model: str = "small"
 
+    # --- Wake word (Satélite) ---
+    # Nome do modelo pré-treinado do openWakeWord. Todos têm default: como
+    # ``extra="forbid"`` rejeita variáveis desconhecidas mas não exige as novas,
+    # um ``.env`` existente continua válido.
+    wake_word_model: str = "hey_jarvis"
+    # Score (0–1) a partir do qual o openWakeWord considera a frase detectada.
+    wake_word_threshold: float = 0.5
+    # Silêncio (após ter ouvido fala) que encerra a gravação do comando.
+    end_silence_s: float = 1.0
+    # Se ninguém falar nesse tempo depois do wake word, descarta (falso positivo).
+    no_speech_timeout_s: float = 5.0
+    # Teto de segurança da gravação de um comando.
+    max_record_s: float = 15.0
+
     # --- Telegram ↔ Cérebro (canal de texto, isolado da Alexa) ---
     # Token do bot criado no BotFather. Default vazio: o Cérebro não precisa
     # dessas vars para subir — só o ``telegram_bot.py`` as consome. Assim o
