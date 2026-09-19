@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import httpx
 import pytest
 import respx
@@ -21,6 +23,24 @@ async def test_call_service_success(test_settings) -> None:  # type: ignore[no-u
         result = await client.call_service("homeassistant", "toggle", {"entity_id": "switch.x"})
         assert result == {"ok": True}
         assert route.called
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_call_service_logs_4xx_error(test_settings, caplog: pytest.LogCaptureFixture) -> None:  # type: ignore[no-untyped-def]
+    """call_service loga (ERROR) status + body do HA ANTES de propagar o erro."""
+    client = HomeAssistantClient(test_settings)
+    with respx.mock(base_url=_HA_URL) as router:
+        router.post("/api/services/homeassistant/toggle").mock(
+            return_value=httpx.Response(404, text="entity not found")
+        )
+        with (
+            caplog.at_level(logging.ERROR, logger="uvicorn.error"),
+            pytest.raises(httpx.HTTPStatusError),
+        ):
+            await client.call_service("homeassistant", "toggle", {"entity_id": "switch.x"})
+    assert "404" in caplog.text
+    assert "entity not found" in caplog.text
     await client.close()
 
 
