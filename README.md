@@ -32,7 +32,7 @@ Media Player via Home Assistant.
 |------|------------|--------|
 | **Cérebro** | FastAPI + LangGraph + LangChain | Recebe texto, decide via grafo, aciona ferramentas, devolve resposta falável |
 | **Motor cognitivo** | Gemini, OpenAI-compatível ou Ollama local | LLM trocável por configuração (ADR-0001) |
-| **Satélite** | `faster-whisper` (CPU/int8) + `sounddevice` | STT 100% offline, push-to-talk |
+| **Satélite** | `openWakeWord` + `faster-whisper` (CPU/int8) + `sounddevice` | Wake word "hey jarvis" + STT 100% offline, hands-free |
 | **Telegram** | `python-telegram-bot` (long polling) | Canal de texto bidirecional, isolado da Alexa |
 | **Integração Física** | Home Assistant REST + Alexa Media Player | Controle de dispositivos IoT e síntese de voz (TTS) |
 | **Ferramentas** | Open-Meteo, Tavily, Home Assistant | Clima, busca web, automação — expostas ao LLM via `@tool` |
@@ -148,11 +148,17 @@ microfone está.
 - `GET /health` (sem auth).
 - Constrói `ha_client` + grafo compilado no `lifespan`.
 
-### `satelite.py` — Satélite (STT offline)
-- `transcribe(audio)`: `faster-whisper` (CPU/int8, `language="pt"`).
-- `capture_audio(seconds)`: grava via `sounddevice` (ponto de extensão p/ VAD).
+### `satelite.py` — Satélite (wake word + STT offline)
+- `capture_audio()`: escuta o microfone até o wake word "hey jarvis"
+  (openWakeWord, ONNX) e grava o comando até ~1 s de silêncio (VAD). Devolve
+  uma fala ou `b""` (falso positivo). Única costura com o hardware.
+- `_listen(...)`: a máquina de estados ESCUTANDO → GRAVANDO, pura e testável
+  (os detectores são injetados).
+- `transcribe(audio)`: `faster-whisper` (CPU/int8, `language="pt"`); o modelo é
+  carregado uma vez por processo.
 - `send_to_brain(text)`: `POST /chat` com header `X-API-Key`.
-- `run_once()`: ciclo push-to-talk completo (Enter → grava → transcreve → envia).
+- `run_once()`: um ciclo (wake word → grava → transcreve → envia).
+  `run_forever()` repete indefinidamente; Ctrl+C encerra.
 
 ---
 
@@ -356,13 +362,27 @@ curl http://localhost:8000/health
 
 Em outro terminal, com o venv ativo:
 
+Uma vez por dispositivo (precisa de rede), baixe os modelos do openWakeWord —
+wake word `hey_jarvis`, modelos de features e o VAD; nada disso vem no pacote:
+
+```bash
+.venv/bin/python -c "import openwakeword; openwakeword.utils.download_models(['hey_jarvis'])"
+```
+
+Depois, inicie o Satélite:
+
 ```bash
 make run-satellite   # python satelite.py
-# Pressione Enter para falar (push-to-talk) → fale → Enter aguarda a resposta
+# Diga "hey jarvis", espere e fale o comando; ~1 s de silêncio encerra a gravação.
+# Ctrl+C encerra.
 ```
 
 > O Satélite baixará o modelo Whisper (`small` por padrão) na primeira
 > execução. Para um start mais rápido, use `WHISPER_MODEL=tiny` no `.env`.
+> Se faltar algum modelo do openWakeWord, o Satélite falha ao iniciar com o
+> erro do `openwakeword` — rode o comando de download acima.
+> Os modelos pré-treinados (inclusive `hey_jarvis`) são CC BY-NC-SA 4.0
+> (uso não comercial).
 
 ### 7. (Opcional) Teste o `/chat` diretamente
 
@@ -412,7 +432,7 @@ pytest tests/test_ha_client.py     # HomeAssistantClient
 pytest tests/test_tools.py         # weather/search/home + schemas
 pytest tests/test_graph.py         # speak_node, route_tools, prompt, build_graph
 pytest tests/test_api.py           # /health, /chat auth e contrato
-pytest tests/test_satelite.py      # transcribe (stub) + send_to_brain
+pytest tests/test_satelite.py      # _listen (wake word/VAD), transcribe (stub), send_to_brain, loop
 pytest tests/test_config.py        # Settings + extra="forbid"
 ```
 
@@ -454,6 +474,11 @@ Copie `.env.example` para `.env` e preencha. Resumo:
 | `BRAIN_API_KEY` | Chave exigida no header `X-API-Key` do `POST /chat` |
 | `BRAIN_URL` | Onde o Cérebro escuta (default `http://localhost:8000`) |
 | `WHISPER_MODEL` | Tamanho do modelo: `tiny`/`base`/`small`/`medium`/`large-v3` |
+| `WAKE_WORD_MODEL` | Modelo de wake word do openWakeWord (opcional, default `hey_jarvis`) |
+| `WAKE_WORD_THRESHOLD` | Score 0–1 que dispara a detecção (opcional, default `0.5`) |
+| `END_SILENCE_S` | Segundos de silêncio que encerram a gravação (opcional, default `1.0`) |
+| `NO_SPEECH_TIMEOUT_S` | Segundos sem fala após o wake word até descartar (opcional, default `5.0`) |
+| `MAX_RECORD_S` | Teto da gravação de um comando (opcional, default `15.0`) |
 | `TELEGRAM_BOT_TOKEN` | Token do bot criado no BotFather (`/newbot`) |
 | `ALLOWED_USERS` | IDs de usuários autorizados, separados por vírgula (`11111,22222`) |
 
@@ -526,7 +551,7 @@ home-assistent-brain/
 ├── AGENT.md                # Diretrizes de arquitetura
 ├── CONTEXT.md              # Linguagem ubíqua do domínio
 ├── api.py                  # Cérebro — FastAPI (POST /chat, GET /health)
-├── satelite.py             # Satélite — faster-whisper STT offline
+├── satelite.py             # Satélite — wake word + faster-whisper STT offline
 ├── docs/
 │   ├── ROADMAP.md          # Plano de implementação (Fases 1–5)
 │   └── adr/
