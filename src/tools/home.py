@@ -52,19 +52,19 @@ def _build_client() -> HomeAssistantClient:
 @tool("control_device", args_schema=HomeInput)
 async def control_device(action: Literal["on", "off", "toggle"], entity_id: str) -> str:
     """Liga, desliga ou alterna um dispositivo do Home Assistant."""
+    # Sem catch genérico: erros do HA (httpx.HTTPStatusError, httpx.HTTPError)
+    # propagam para o nó de tool do grafo, que loga o diagnóstico e devolve o
+    # fallback amigável (_FALLBACK) ao LLM. O ``finally`` garante fechar o client.
+    client = _build_client()
     try:
-        client = _build_client()
-        try:
-            if action == "toggle":
-                await client.toggle(entity_id)
-            elif action == "on":
-                await client.turn_on(entity_id)
-            else:
-                await client.turn_off(entity_id)
-        finally:
-            await client.close()
-    except Exception:  # noqa: BLE001 — ferramenta defensiva para voz
-        return _FALLBACK
+        if action == "toggle":
+            await client.toggle(entity_id)
+        elif action == "on":
+            await client.turn_on(entity_id)
+        else:
+            await client.turn_off(entity_id)
+    finally:
+        await client.close()
 
     apelido = _alias(entity_id)
     if action == "on":
