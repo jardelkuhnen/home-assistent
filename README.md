@@ -331,10 +331,16 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 ### 3. Instale as dependências e os hooks
 
 ```bash
-make setup        # equivale a: pip install -e ".[dev]"  &&  pre-commit install
+make setup        # equivale a: pip install -e ".[dev]"  &&  pip install --no-deps openwakeword  &&  pre-commit install
 ```
 
-> Sem `make`: `pip install -e ".[dev]"` depois `pre-commit install`.
+> Sem `make`: `pip install -e ".[dev]"`, depois
+> `pip install --no-deps "openwakeword>=0.6.0,<0.7"` e, por fim, `pre-commit install`.
+>
+> O `openwakeword` é instalado à parte, com `--no-deps`, porque no Linux ele declara
+> o `tflite-runtime` como dependência obrigatória e esse pacote não tem wheel para
+> Python 3.12 ou superior. O Satélite usa só o backend ONNX; as demais dependências
+> reais do `openwakeword` já estão no `pyproject.toml`.
 
 ### 4. Configure o ambiente
 
@@ -360,7 +366,7 @@ curl http://localhost:8000/health
 
 ### 6. (Opcional) Inicie o Satélite (captura de voz)
 
-Em outro terminal, com o venv ativo:
+Em outro terminal, com o venv ativo.
 
 Uma vez por dispositivo (precisa de rede), baixe os modelos do openWakeWord —
 wake word `hey_jarvis`, modelos de features e o VAD; nada disso vem no pacote:
@@ -368,6 +374,13 @@ wake word `hey_jarvis`, modelos de features e o VAD; nada disso vem no pacote:
 ```bash
 .venv/bin/python -c "import openwakeword; openwakeword.utils.download_models(['hey_jarvis'])"
 ```
+
+Os modelos são gravados dentro do venv (`site-packages/openwakeword/resources/models`),
+então recriar o venv ou atualizar o pacote exige rodar esse comando de novo.
+
+`WAKE_WORD_MODEL` só funciona com nomes de modelos pré-treinados (`hey_jarvis`, `alexa`,
+`hey_mycroft`, `hey_rhasspy`, `timer`, `weather`); qualquer nome diferente de `hey_jarvis`
+exige antes o seu próprio `download_models(['<nome>'])`.
 
 Depois, inicie o Satélite:
 

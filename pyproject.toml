@@ -24,7 +24,14 @@ dependencies = [
     "faster-whisper",
     "sounddevice",
     "numpy",
-    "openwakeword>=0.6.0,<0.7",
+    # openwakeword NÃO é listado aqui: no Linux ele exige `tflite-runtime`, que não tem
+    # wheel para Python >=3.12. Ele é instalado com `--no-deps` (`make install`; só ONNX,
+    # o caminho documentado). Abaixo, suas demais dependências reais (mesmos limites).
+    "onnxruntime>=1.10.0,<2",
+    "tqdm>=4.0,<5.0",
+    "scipy>=1.3,<2",
+    "scikit-learn>=1,<2",
+    "requests>=2.0,<3",
     "python-telegram-bot",
 ]
 

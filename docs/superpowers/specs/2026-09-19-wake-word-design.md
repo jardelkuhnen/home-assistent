@@ -175,6 +175,11 @@ denominador comum (Mac de desenvolvimento e Pi) e o Makefile
 fixa o 3.12. Se o consumo de CPU no Pi for problema, reavaliar tflite; o teste
 de fumaça mede isso.
 
+Nota: o openwakeword 0.6.0 declara `tflite-runtime` como dependência obrigatória
+no Linux (`platform_system == "Linux"`) e o PyPI não tem wheel cp312 ou superior
+dele. Por isso o openwakeword é instalado com `--no-deps` (Makefile/README) e suas
+dependências reais ficam listadas no `pyproject.toml`.
+
 ## Teste de fumaça (Mac x86, Python 3.12, voz sintética do `say`)
 
 `Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")` e `VAD()`
