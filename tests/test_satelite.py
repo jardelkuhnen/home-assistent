@@ -285,3 +285,63 @@ def test_drain_returns_when_stopped_while_queue_is_empty() -> None:
     threading.Timer(0.05, stop.set).start()
 
     assert list(_drain(audio_q, stop)) == []
+
+
+async def test_run_once_skips_transcription_when_no_audio(
+    test_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Falso positivo do wake word → capture_audio devolve b"": não chama Whisper nem Cérebro."""
+    import satelite
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise AssertionError("não deveria ser chamado com áudio vazio")
+
+    monkeypatch.setattr(satelite, "capture_audio", lambda *a, **k: b"")
+    monkeypatch.setattr(satelite, "transcribe", fail)
+    monkeypatch.setattr(satelite, "send_to_brain", fail)
+
+    await satelite.run_once()
+
+    assert "Nada capturado" in capsys.readouterr().err
+
+
+async def test_run_forever_sets_stop_when_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cancelar (Ctrl+C) tem de liberar a thread de captura via _stop."""
+    import satelite
+
+    started = asyncio.Event()
+
+    async def fake_run_once() -> None:
+        started.set()
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(satelite, "run_once", fake_run_once)
+
+    task = asyncio.create_task(satelite.run_forever())
+    await started.wait()
+    assert not satelite._stop.is_set()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert satelite._stop.is_set()
+
+
+async def test_run_forever_repeats_run_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    import satelite
+
+    calls = 0
+
+    async def fake_run_once() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise RuntimeError("fim do teste")
+
+    monkeypatch.setattr(satelite, "run_once", fake_run_once)
+
+    with pytest.raises(RuntimeError, match="fim do teste"):
+        await satelite.run_forever()
+
+    assert calls == 3

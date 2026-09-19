@@ -234,10 +234,13 @@ async def _with_spinner(message: str, coro: Awaitable[_T]) -> _T:
 
 
 async def run_once() -> None:
-    """Um ciclo completo: captura → transcreve → envia ao Cérebro."""
-    print("Mantenha o Shift pressionado para falar (solte para parar)...", file=sys.stderr)
+    """Um ciclo completo: espera o wake word → grava → transcreve → envia ao Cérebro."""
+    audio = await _with_spinner('Escutando (diga "hey jarvis")', asyncio.to_thread(capture_audio))
+    if not audio:
+        # Falso positivo do wake word (sem fala depois): não há o que transcrever.
+        print("Nada capturado.", file=sys.stderr)
+        return
 
-    audio = await _with_spinner("Gravando áudio", asyncio.to_thread(capture_audio))
     text = await _with_spinner("Transcrevendo", asyncio.to_thread(transcribe, audio))
     print(f"Você disse: {text}", file=sys.stderr)
 
@@ -268,8 +271,20 @@ async def run_once() -> None:
             )
 
 
+async def run_forever() -> None:
+    """Escuta continuamente. Ao ser cancelado (Ctrl+C), libera a thread de captura."""
+    try:
+        while True:
+            await run_once()
+    finally:
+        _stop.set()
+
+
 def main() -> None:
-    asyncio.run(run_once())
+    try:
+        asyncio.run(run_forever())
+    except KeyboardInterrupt:
+        print("Encerrando.", file=sys.stderr)
 
 
 if __name__ == "__main__":
