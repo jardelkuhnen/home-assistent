@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cérebro — Painel</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --surface: #ffffff; --text: #1b1f24; --muted: #5b6673; --border: #d9dee5;
+    --ok: #1a7f45; --err: #c62828; --run: #b26a00; --accent: #2456c9; --idle: #8a94a0;
+    --ok-bg: #e4f4ea; --err-bg: #fbe6e6; --run-bg: #fff1d6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121519; --surface: #1b2027; --text: #e8ebef; --muted: #98a3b0; --border: #2e3641;
+      --ok: #52c283; --err: #ff7b72; --run: #f0b34a; --accent: #7aa2ff; --idle: #6b7580;
+      --ok-bg: #16301f; --err-bg: #3a1c1c; --run-bg: #3a2c10;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main > *, .cols > * { min-width: 0; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; display: grid; gap: 16px; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+  h1 { font-size: 1.3rem; margin: 0; flex: 1 1 auto; }
+  h2 { font-size: 1rem; margin: 0 0 10px; }
+  section { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px; }
+  .muted { color: var(--muted); }
+  .small { font-size: .85rem; }
+  .live { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--idle); flex: none; }
+  .live.on { color: var(--ok); } .live.on .dot { background: var(--ok); }
+  .live.off { color: var(--err); } .live.off .dot { background: var(--err); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 14px; }
+  .card .label { color: var(--muted); font-size: .85rem; }
+  .card .value { font-size: 1.6rem; font-weight: 650; }
+  .card .sub { color: var(--muted); font-size: .8rem; }
+  .cols { display: grid; grid-template-columns: 1fr; gap: 16px; }
+  @media (min-width: 900px) { .cols { grid-template-columns: 1fr 1fr; } }
+  ul.list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  button.row { all: unset; box-sizing: border-box; width: 100%; cursor: pointer; display: grid;
+    grid-template-columns: auto 1fr auto; gap: 4px 10px; align-items: center; padding: 8px 10px;
+    border: 1px solid var(--border); border-radius: 8px; }
+  button.row:hover { background: var(--bg); }
+  button.row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button.row[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .row .meta { grid-column: 2 / 4; }
+  .badge { font-size: .72rem; font-weight: 700; padding: 2px 8px; border-radius: 999px;
+    letter-spacing: .03em; }
+  .badge.ok { color: var(--ok); background: var(--ok-bg); }
+  .badge.error { color: var(--err); background: var(--err-bg); }
+  .badge.running { color: var(--run); background: var(--run-bg); }
+  .dot.ok { background: var(--ok); } .dot.error { background: var(--err); }
+  .dot.running { background: var(--run); }
+  .tools { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+  .tool { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+  .tool h3 { margin: 0 0 4px; font-size: .95rem; font-family: ui-monospace, Menlo, monospace; }
+  .tool p { margin: 0 0 8px; font-size: .85rem; color: var(--muted); max-height: 4.4em;
+    overflow: hidden; }
+  table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; }
+  .scroll { overflow-x: auto; }
+  svg.topo { width: 100%; height: auto; min-width: 520px; display: block; }
+  .topo .edge { fill: none; stroke: var(--idle); stroke-width: 1.5; }
+  .topo .edge.cond { stroke-dasharray: 5 4; }
+  .topo .edge.hit { stroke: var(--accent); stroke-width: 2.5; }
+  .topo rect.node { fill: var(--bg); stroke: var(--idle); stroke-width: 1.5; }
+  .topo .node-g.visited rect.node { fill: var(--ok-bg); stroke: var(--ok); stroke-width: 2; }
+  .topo .node-g.error rect.node { fill: var(--err-bg); stroke: var(--err); }
+  .topo text { fill: var(--text); font: 13px system-ui, sans-serif; }
+  .topo text.sub { fill: var(--muted); font-size: 11px; }
+  .topo .node-g:not(.visited) text { fill: var(--muted); }
+  .topo marker path { fill: var(--idle); }
+  .empty { color: var(--muted); padding: 6px 0; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Cérebro — Painel de observabilidade</h1>
+    <span id="live" class="live off" role="status"><span class="dot"></span><span id="live-text">Conectando…</span></span>
+    <span id="updated" class="muted small"></span>
+  </header>
+
+  <div class="cards" id="cards"></div>
+
+  <section aria-labelledby="h-live">
+    <h2 id="h-live">Atividade ao vivo</h2>
+    <ul class="list" id="activity"></ul>
+  </section>
+
+  <section aria-labelledby="h-topo">
+    <h2 id="h-topo">Topologia do grafo</h2>
+    <p class="muted small" id="topo-caption"></p>
+    <div class="scroll" id="topology"></div>
+  </section>
+
+  <div class="cols">
+    <section aria-labelledby="h-brain">
+      <h2 id="h-brain">Cérebro e canais</h2>
+      <div id="brain"></div>
+    </section>
+    <section aria-labelledby="h-detail">
+      <h2 id="h-detail">Passos do turno selecionado</h2>
+      <div class="scroll" id="detail"></div>
+    </section>
+  </div>
+
+  <section aria-labelledby="h-tools">
+    <h2 id="h-tools">Tools</h2>
+    <div class="tools" id="tools"></div>
+  </section>
+
+  <section aria-labelledby="h-hist">
+    <h2 id="h-hist">Histórico</h2>
+    <div class="scroll" id="history"></div>
+  </section>
+</main>
+
+<script>
+"use strict";
+const POLL_MS = 2000;
+const SVG_NS = "http://www.w3.org/2000/svg";
+const STATUS_LABEL = { running: "RODANDO", ok: "OK", error: "ERRO" };
+const CHANNEL_LABEL = { satellite: "Satélite (voz)", telegram: "Telegram" };
+
+let overview = null;
+let selectedId = null;
+let selectedRun = null;
+let lastOk = false;
+
+// Todo texto vindo da API entra via textContent — nunca innerHTML.
+function h(tag, attrs, ...children) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v);
+  }
+  for (const c of children) el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return el;
+}
+function s(tag, attrs, text) {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, v);
+  if (text !== undefined) el.textContent = text;
+  return el;
+}
+const $ = (id) => document.getElementById(id);
+
+function fmtDuration(ms) {
+  if (ms === null || ms === undefined) return "—";
+  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1).replace(".", ",")} s`;
+}
+function fmtClock(iso) {
+  return iso ? new Date(iso).toLocaleTimeString("pt-BR") : "—";
+}
+function fmtAgo(iso) {
+  if (!iso) return "nunca";
+  const sec = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (sec < 60) return `há ${sec} s`;
+  if (sec < 3600) return `há ${Math.floor(sec / 60)} min`;
+  if (sec < 86400) return `há ${Math.floor(sec / 3600)} h`;
+  return `há ${Math.floor(sec / 86400)} d`;
+}
+function fmtUptime(sec) {
+  const d = Math.floor(sec / 86400), hh = Math.floor((sec % 86400) / 3600),
+    m = Math.floor((sec % 3600) / 60);
+  return d ? `${d} d ${hh} h` : hh ? `${hh} h ${m} min` : `${m} min ${sec % 60} s`;
+}
+function badge(status) {
+  return h("span", { class: `badge ${status}` }, STATUS_LABEL[status] || status);
+}
+function channelName(source) { return CHANNEL_LABEL[source] || source; }
+function lastStep(steps) {
+  if (!steps.length) return "nenhum passo concluído";
+  const st = steps[steps.length - 1];
+  return st.tool ? `${st.node} · ${st.tool}` : st.node;
+}
+
+// ---- Renderização -----------------------------------------------------
+
+function renderHeader() {
+  $("live").className = `live ${lastOk ? "on" : "off"}`;
+  $("live-text").textContent = lastOk ? "Ao vivo" : "Sem conexão";
+  if (lastOk) $("updated").textContent = `Atualizado às ${new Date().toLocaleTimeString("pt-BR")}`;
+}
+
+function renderCards(o) {
+  const lastChannel = Object.values(o.channels).map((c) => c.last_activity).filter(Boolean).sort().pop();
+  const cards = [
+    ["Turnos ativos", o.cards.active_runs, "em andamento agora"],
+    ["Tools disponíveis", o.cards.tools_total, "registradas no grafo"],
+    ["Turnos 24h", o.cards.runs_24h, `${o.cards.errors_24h} com erro`],
+    ["Canais", Object.keys(o.channels).length, `última atividade: ${fmtAgo(lastChannel)}`],
+  ];
+  $("cards").replaceChildren(...cards.map(([label, value, sub]) =>
+    h("div", { class: "card" },
+      h("div", { class: "label" }, label), h("div", { class: "value" }, value),
+      h("div", { class: "sub" }, sub))));
+}
+
+function runButton(run, isActive) {
+  const status = isActive ? "running" : run.status;
+  const time = isActive ? fmtDuration(run.elapsed_ms) : fmtDuration(run.duration_ms);
+  const detail = isActive ? `passo: ${lastStep(run.steps)}`
+    : (run.tools.length ? `tools: ${run.tools.join(", ")}` : "sem tools");
+  return h("button", {
+    class: "row", type: "button", "data-run-id": run.id,
+    "aria-pressed": String(run.id === selectedId),
+    onclick: () => selectRun(run.id),
+  },
+    h("span", { class: `dot ${status}`, "aria-hidden": "true" }),
+    h("span", {}, `${channelName(run.source)} · ${fmtClock(run.started_at)}`),
+    h("span", {}, badge(status), " ", time),
+    h("span", { class: "meta muted small" }, detail));
+}
+
+function renderActivity(o) {
+  const items = [
+    ...o.active.map((r) => runButton(r, true)),
+    ...o.recent.slice(0, 8).map((r) => runButton(r, false)),
+  ];
+  $("activity").replaceChildren(...(items.length
+    ? items.map((b) => h("li", {}, b))
+    : [h("li", { class: "empty" }, "Nenhum turno ainda")]));
+}
+
+function renderBrain(o) {
+  const b = o.brain;
+  const rows = [
+    ["Provider", b.llm_provider], ["Modelo", b.llm_model], ["Uptime", fmtUptime(b.uptime_s)],
+    ["Catálogo de dispositivos", b.catalog_loaded ? "carregado" : "fallback estático"],
+  ];
+  const channels = Object.entries(o.channels).map(([name, c]) =>
+    h("tr", {}, h("td", {}, channelName(name)), h("td", {}, fmtAgo(c.last_activity)),
+      h("td", {}, c.runs_24h)));
+  $("brain").replaceChildren(
+    h("table", {}, h("tbody", {}, ...rows.map(([k, v]) => h("tr", {}, h("th", { scope: "row" }, k), h("td", {}, v))))),
+    h("p", { class: "muted small" }, "Canais — a atividade é inferida do último /chat (não distingue ocioso de parado)."),
+    h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Canal"), h("th", {}, "Última atividade"), h("th", {}, "Turnos 24h"))),
+      h("tbody", {}, ...channels)));
+}
+
+function renderTools(o) {
+  $("tools").replaceChildren(...o.tools.map((t) => {
+    const rate = t.calls ? `${Math.round((t.errors / t.calls) * 100)}% de erro` : "sem chamadas";
+    return h("div", { class: "tool" },
+      h("h3", {}, t.name), h("p", {}, t.description),
+      h("div", { class: "small" }, `${t.calls} chamadas · ${rate}`),
+      h("div", { class: "small muted" }, `último uso: ${fmtAgo(t.last_used)}`));
+  }));
+}
+
+function renderHistory(o) {
+  if (!o.recent.length) {
+    $("history").replaceChildren(h("div", { class: "empty" }, "Nenhum turno ainda"));
+    return;
+  }
+  const rows = o.recent.map((r) => h("tr", {},
+    h("td", {}, h("button", {
+      class: "row", type: "button", "data-run-id": r.id, "aria-pressed": String(r.id === selectedId),
+      onclick: () => selectRun(r.id),
+    }, h("span", { class: `dot ${r.status}`, "aria-hidden": "true" }),
+      h("span", {}, fmtClock(r.started_at)), h("span", {}, badge(r.status)))),
+    h("td", {}, channelName(r.source)), h("td", {}, fmtDuration(r.duration_ms)),
+    h("td", {}, r.tools.join(", ") || "—"), h("td", {}, r.spoken ? "sim" : "não")));
+  $("history").replaceChildren(h("table", {},
+    h("thead", {}, h("tr", {}, ...["Turno", "Canal", "Duração", "Tools", "Falado"].map((c) => h("th", {}, c)))),
+    h("tbody", {}, ...rows)));
+}
+
+function renderDetail() {
+  const box = $("detail");
+  if (!selectedRun) {
+    box.replaceChildren(h("div", { class: "empty" }, "Selecione um turno para ver os passos."));
+    return;
+  }
+  const r = selectedRun;
+  const rows = r.steps.map((st) => h("tr", {},
+    h("td", {}, st.seq + 1), h("td", {}, st.node), h("td", {}, st.tool || "—"),
+    h("td", {}, fmtDuration(st.duration_ms)), h("td", {}, badge(st.status)),
+    h("td", {}, st.error || "")));
+  box.replaceChildren(
+    h("p", { class: "small" }, badge(r.status), ` ${channelName(r.source)} · ${fmtClock(r.started_at)}`,
+      r.error ? ` · erro: ${r.error}` : ""),
+    r.steps.length
+      ? h("table", {},
+        h("thead", {}, h("tr", {}, ...["#", "Nó", "Tool", "Duração", "Status", "Erro"].map((c) => h("th", {}, c)))),
+        h("tbody", {}, ...rows))
+      : h("div", { class: "empty" }, "Nenhum passo concluído ainda."));
+}
+
+// ---- Topologia ----------------------------------------------------------
+
+function layout(topology) {
+  const { nodes, edges } = topology;
+  // Arestas de volta (ex.: tools → chatbot) são as que apontam para um nó da
+  // pilha do DFS; ficam fora das camadas e são desenhadas curvas.
+  const back = new Set();
+  const state = {}; // 1 = na pilha, 2 = concluído
+  const dfs = (n) => {
+    state[n] = 1;
+    for (const e of edges) {
+      if (e.source !== n) continue;
+      if (state[e.target] === 1) back.add(e);
+      else if (!state[e.target]) dfs(e.target);
+    }
+    state[n] = 2;
+  };
+  dfs("__start__");
+  const forward = edges.filter((e) => !back.has(e));
+  const layer = Object.fromEntries(nodes.map((n) => [n, 0]));
+  for (let i = 0; i < nodes.length; i++)
+    for (const e of forward) layer[e.target] = Math.max(layer[e.target], layer[e.source] + 1);
+  const rowsInLayer = {};
+  const pos = {};
+  for (const n of nodes) {
+    const row = rowsInLayer[layer[n]] = (rowsInLayer[layer[n]] ?? -1) + 1;
+    pos[n] = { layer: layer[n], row };
+  }
+  return { pos, back };
+}
+
+function renderTopology(o) {
+  const NW = 130, NH = 44, GX = 60, GY = 46, PAD = 16, TOP = 34;
+  const { pos, back } = layout(o.topology);
+  const run = selectedRun;
+  const visited = {};
+  if (run) {
+    for (const st of run.steps) {
+      const v = visited[st.node] ||= { count: 0, ms: 0, tools: [], error: false };
+      v.count += 1; v.ms += st.duration_ms || 0;
+      if (st.tool) v.tools.push(st.tool);
+      if (st.status === "error") v.error = true;
+    }
+    if (run.steps.length) visited.__start__ = { count: 1, ms: 0, tools: [], error: false };
+    if (run.status !== "running") visited.__end__ = { count: 1, ms: 0, tools: [], error: run.status === "error" };
+  }
+  const maxLayer = Math.max(...Object.values(pos).map((p) => p.layer));
+  const maxRow = Math.max(...Object.values(pos).map((p) => p.row));
+  const width = PAD * 2 + (maxLayer + 1) * NW + maxLayer * GX;
+  const height = PAD * 2 + TOP + (maxRow + 1) * (NH + 26) + maxRow * GY + 40;
+  const x = (n) => PAD + pos[n].layer * (NW + GX);
+  const y = (n) => PAD + TOP + pos[n].row * (NH + 26 + GY);
+  const svg = s("svg", { class: "topo", viewBox: `0 0 ${width} ${height}`, role: "img",
+    "aria-label": "Topologia do grafo do Cérebro" });
+  const marker = s("marker", { id: "arrow", viewBox: "0 0 10 10", refX: "9", refY: "5",
+    markerWidth: "7", markerHeight: "7", markerUnits: "userSpaceOnUse", orient: "auto-start-reverse" });
+  marker.append(s("path", { d: "M0,0 L10,5 L0,10 z" }));
+  svg.append(s("defs", {}, "")); svg.firstChild.append(marker);
+
+  for (const e of o.topology.edges) {
+    const isBack = back.has(e);
+    const hit = visited[e.source] && visited[e.target];
+    const x1 = x(e.source) + NW, y1 = y(e.source) + NH / 2;
+    const x2 = x(e.target), y2 = y(e.target) + NH / 2;
+    let d;
+    if (isBack) {
+      // Volta curva por baixo dos nós: da base de origem à base do destino.
+      const sx = x(e.source) + NW * 0.85, sy = y(e.source) + NH + 24;
+      const tx = x(e.target) + NW / 2, ty = y(e.target) + NH + 24;
+      d = `M${sx},${y(e.source) + NH} C${sx},${sy + 30} ${tx},${ty + 30} ${tx},${y(e.target) + NH}`;
+    } else if (pos[e.target].layer - pos[e.source].layer > 1) {
+      // Aresta que pula camadas: arco por cima, para não atravessar os nós do meio.
+      const sx = x(e.source) + NW / 2, tx = x(e.target) + NW / 2;
+      d = `M${sx},${y(e.source)} C${sx},${y(e.source) - TOP - 6} ${tx},${y(e.target) - TOP - 6} ${tx},${y(e.target)}`;
+    } else {
+      const mid = (x1 + x2) / 2;
+      d = `M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}`;
+    }
+    svg.append(s("path", { d, class: `edge${e.conditional ? " cond" : ""}${hit ? " hit" : ""}`,
+      "marker-end": "url(#arrow)" }));
+  }
+  for (const n of o.topology.nodes) {
+    const v = visited[n];
+    const g = s("g", { class: `node-g${v ? " visited" : ""}${v && v.error ? " error" : ""}` });
+    g.append(s("rect", { class: "node", x: x(n), y: y(n), width: NW, height: NH, rx: 8 }));
+    const label = n === "__start__" ? "Início" : n === "__end__" ? "Fim" : n;
+    g.append(s("text", { x: x(n) + NW / 2, y: y(n) + (v && v.ms ? 19 : 26), "text-anchor": "middle" }, label));
+    if (v && v.ms) {
+      const times = v.count > 1 ? ` (×${v.count})` : "";
+      g.append(s("text", { class: "sub", x: x(n) + NW / 2, y: y(n) + 35, "text-anchor": "middle" },
+        `${fmtDuration(v.ms)}${times}`));
+    }
+    if (v && v.tools.length) {
+      [...new Set(v.tools)].forEach((t, i) =>
+        g.append(s("text", { class: "sub", x: x(n) + 6, y: y(n) + NH + 14 + i * 13 }, t)));
+    }
+    svg.append(g);
+  }
+  $("topology").replaceChildren(svg);
+  $("topo-caption").textContent = run
+    ? `Caminho do turno de ${channelName(run.source)} às ${fmtClock(run.started_at)}. Linhas tracejadas são condicionais.`
+    : "Selecione um turno para destacar o caminho percorrido. Linhas tracejadas são condicionais.";
+}
+
+function render() {
+  if (!overview) return;
+  const focus = document.activeElement && document.activeElement.dataset
+    ? document.activeElement.dataset.runId : null;
+  renderHeader(); renderCards(overview); renderActivity(overview); renderBrain(overview);
+  renderTools(overview); renderHistory(overview); renderDetail(); renderTopology(overview);
+  if (focus) {
+    const again = document.querySelector(`button[data-run-id="${CSS.escape(focus)}"]`);
+    if (again) again.focus();
+  }
+}
+
+// ---- Dados --------------------------------------------------------------
+
+async function fetchJson(url) {
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
+  return res.json();
+}
+
+async function loadSelected() {
+  if (!selectedId) return;
+  const id = selectedId;
+  try {
+    const run = await fetchJson(`/api/dashboard/runs/${encodeURIComponent(id)}`);
+    if (id === selectedId) selectedRun = run;
+  } catch (_) { /* mantém o último detalhe */ }
+}
+
+function selectRun(id) {
+  selectedId = id;
+  selectedRun = null;
+  render();
+  loadSelected().then(render);
+}
+
+async function poll() {
+  if (document.hidden) return;
+  try {
+    overview = await fetchJson("/api/dashboard/overview");
+    lastOk = true;
+    // Turno em andamento muda a cada passo: reconsulta até concluir.
+    if (selectedId && (!selectedRun || selectedRun.status === "running")) await loadSelected();
+  } catch (_) {
+    lastOk = false; // mantém os últimos dados na tela
+  }
+  render();
+  renderHeader();
+}
+
+document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
+poll();
+setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>
