@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     ha_token: SecretStr
     ha_timeout_s: float = 5.0
     alexa_media_entity: str
+    # TTL do cache do catálogo de dispositivos (DeviceCatalog). Default 300s;
+    # como tem default, não quebra .env existente (extra="forbid").
+    catalog_ttl_s: float = 300.0
 
     # --- Tavily (busca web) ---
     tavily_api_key: SecretStr

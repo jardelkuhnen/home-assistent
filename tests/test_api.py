@@ -4,21 +4,27 @@ from __future__ import annotations
 
 import logging
 
+import httpx
 import pytest
+import respx
 from fastapi.testclient import TestClient
 
 import api as api_module
 from src.config import get_settings
 
 _API_KEY = "test-brain-key"
+_HA_URL = "http://homeassistant.local:8123"
 
 
 @pytest.fixture
 def client(test_env: dict[str, str]) -> TestClient:
     get_settings.cache_clear()
-    # Recria o grafo/ha_client do lifespan com settings de teste.
-    with TestClient(api_module.app) as c:
-        yield c
+    # Mocka /api/states para o warm-up do catálogo no lifespan não depender
+    # de rede real (lista vazia ⇒ catálogo vazio ⇒ degrada graciosa).
+    with respx.mock(base_url=_HA_URL, assert_all_called=False) as router:
+        router.get("/api/states").mock(return_value=httpx.Response(200, json=[]))
+        with TestClient(api_module.app) as c:
+            yield c
 
 
 def test_health_no_auth(client: TestClient) -> None:
@@ -32,8 +38,10 @@ def test_startup_logs_active_llm(
 ) -> None:
     caplog.set_level(logging.INFO, logger="uvicorn.error")
 
-    with TestClient(api_module.app):
-        pass
+    with respx.mock(base_url=_HA_URL, assert_all_called=False) as router:
+        router.get("/api/states").mock(return_value=httpx.Response(200, json=[]))
+        with TestClient(api_module.app):
+            pass
 
     assert "llm_provider=gemini" in caplog.text
     assert "llm_model=gemini-3.5-flash" in caplog.text

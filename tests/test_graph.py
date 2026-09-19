@@ -264,6 +264,79 @@ async def test_chatbot_node_selects_voice_prompt_by_default(
     assert messages[0].content == SYSTEM_PROMPT
 
 
+async def test_chatbot_node_injects_catalog_context(
+    test_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    """chatbot_node injeta o catálogo de dispositivos como SystemMessage após o prompt."""
+
+    class _StubCatalog:
+        def as_context(self) -> str:
+            return "Dispositivos disponíveis:\n- Principal Sala (switch.principal_sala)"
+
+    captured: dict[str, object] = {}
+
+    class _Bound:
+        async def ainvoke(self, messages, config=None, **kwargs):  # noqa: ANN001, ARG002
+            captured["messages"] = messages
+            return AIMessage(content="ok")
+
+    class _LLM:
+        def bind_tools(self, tools, **kwargs):  # noqa: ANN001, ARG002
+            return _Bound()
+
+    monkeypatch.setattr("src.graph.nodes.get_llm", lambda: _LLM())
+    monkeypatch.setattr("src.graph.nodes.get_catalog", lambda: _StubCatalog())
+    state: AgentState = {
+        "messages": [HumanMessage(content="ligar principal sala")],
+        "spoken": False,
+        "error": None,
+        "source": None,
+        "session_id": None,
+    }
+    await chatbot_node(state)
+    messages = list(captured["messages"])  # type: ignore[arg-type]
+    # [0]=prompt de voz, [1]=catálogo, [2]=HumanMessage.
+    assert isinstance(messages[1], SystemMessage)
+    assert "switch.principal_sala" in messages[1].content
+    assert "Principal Sala" in messages[1].content
+
+
+async def test_chatbot_node_omits_catalog_when_empty(
+    test_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    """Catálogo vazio (HA fora no boot) → não injeta SystemMessage de catálogo."""
+
+    class _StubCatalog:
+        def as_context(self) -> str:
+            return ""
+
+    captured: dict[str, object] = {}
+
+    class _Bound:
+        async def ainvoke(self, messages, config=None, **kwargs):  # noqa: ANN001, ARG002
+            captured["messages"] = messages
+            return AIMessage(content="ok")
+
+    class _LLM:
+        def bind_tools(self, tools, **kwargs):  # noqa: ANN001, ARG002
+            return _Bound()
+
+    monkeypatch.setattr("src.graph.nodes.get_llm", lambda: _LLM())
+    monkeypatch.setattr("src.graph.nodes.get_catalog", lambda: _StubCatalog())
+    state: AgentState = {
+        "messages": [HumanMessage(content="oi")],
+        "spoken": False,
+        "error": None,
+        "source": None,
+        "session_id": None,
+    }
+    await chatbot_node(state)
+    messages = list(captured["messages"])  # type: ignore[arg-type]
+    # Sem catálogo: [0]=prompt, [1]=HumanMessage (sem SystemMessage extra).
+    assert isinstance(messages[0], SystemMessage)
+    assert not isinstance(messages[1], SystemMessage)
+
+
 def test_build_graph_compiles(test_settings: Settings) -> None:  # type: ignore[no-untyped-def]
     from src.graph import build_graph
 

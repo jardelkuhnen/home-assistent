@@ -20,7 +20,10 @@ from pydantic import BaseModel
 from src.config import Settings, get_settings
 from src.graph import build_graph
 from src.graph.nodes import content_to_text
+from src.graph.nodes import set_catalog as set_graph_catalog
+from src.services.catalog import DeviceCatalog
 from src.services.ha_client import HomeAssistantClient
+from src.tools.home import set_catalog as set_tool_catalog
 
 # Uvicorn configura este logger para o console; usar o logger do módulo faria
 # o registro depender da configuração do root logger da aplicação chamadora.
@@ -192,7 +195,7 @@ async def verify_api_key(
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Ciclo de vida: cria HA client e grafo compilado na inicialização."""
+    """Ciclo de vida: cria HA client, aquece o catálogo e compila o grafo."""
     settings = get_settings()
     logger.info(
         "Brain iniciado | llm_provider=%s | llm_model=%s",
@@ -201,6 +204,16 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     )
     ha_client = HomeAssistantClient(settings)
     app.state.ha_client = ha_client
+    # Catálogo de dispositivos: warm-up no boot (best-effort — em falha do HA
+    # cai no fallback estático). Compartilha o ha_client (fechado no finally).
+    catalog = DeviceCatalog(
+        ha_client=ha_client,
+        ttl_s=settings.catalog_ttl_s,
+    )
+    await catalog.refresh()
+    app.state.catalog = catalog
+    set_graph_catalog(catalog)
+    set_tool_catalog(catalog)
     app.state.graph = build_graph(ha_client)
     try:
         yield

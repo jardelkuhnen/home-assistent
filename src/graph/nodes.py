@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Protocol
 
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 
@@ -21,6 +21,28 @@ logger = logging.getLogger("uvicorn.error")
 # Alias de tipo para os nós do grafo. Nós devolvem estado parcial (reducer
 # ``add_messages``/sobrescrita mesclam no estado completo).
 Node = Callable[[AgentState], Awaitable[dict[str, Any]]]
+
+# Catálogo de dispositivos injetado pelo lifespan no boot. ``None`` ⇒ ausente
+# (testes sem warm-up, ou boot sem catálogo): o chatbot_node simplesmente não
+# injeta a SystemMessage de catálogo — comportamento pré-catálogo.
+_CATALOG: DeviceCatalogLike | None = None
+
+
+class DeviceCatalogLike(Protocol):
+    """Contrato mínimo do catálogo que o grafo consome (contexto p/ o LLM)."""
+
+    def as_context(self) -> str: ...
+
+
+def set_catalog(catalog: DeviceCatalogLike | None) -> None:
+    """Injeta o catálogo (lifespan). ``None`` reseta (testes)."""
+    global _CATALOG
+    _CATALOG = catalog
+
+
+def get_catalog() -> DeviceCatalogLike | None:
+    """Acesso ao catálogo injetado (factory-style p/ monkeypatch em testes)."""
+    return _CATALOG
 
 
 def content_to_text(content: Any) -> str:
@@ -63,7 +85,16 @@ async def chatbot_node(state: AgentState) -> dict[str, Any]:
     is_telegram = isinstance(source, str) and source.lower() == "telegram"
     prompt = SYSTEM_PROMPT_TELEGRAM if is_telegram else SYSTEM_PROMPT
 
-    messages: list[BaseMessage] = [SystemMessage(content=prompt), *state["messages"]]
+    messages: list[BaseMessage] = [SystemMessage(content=prompt)]
+    # Catálogo de dispositivos: injetado como SystemMessage extra quando
+    # populado, para o LLM escolher o entity_id correto ao chamar
+    # control_device. Vazio/ausente ⇒ omitido (sem regressão).
+    catalog = get_catalog()
+    if catalog is not None:
+        context = catalog.as_context()
+        if context:
+            messages.append(SystemMessage(content=context))
+    messages.extend(state["messages"])
     response = await llm_with_tools.ainvoke(messages)
 
     ai_message = response if isinstance(response, BaseMessage) else AIMessage(content=str(response))
