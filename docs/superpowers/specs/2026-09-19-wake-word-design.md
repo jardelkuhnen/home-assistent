@@ -67,7 +67,16 @@ Os detectores são injetados, então trocar o VAD por outro é mudar uma funçã
 
 ### Loop e ciclo de vida
 
-- `main()` passa a rodar `while True: await run_once()`; Ctrl+C encerra.
+- `main()` passa a rodar `run_forever()`, um `while True: await run_once()`.
+- **Ctrl+C precisa encerrar limpo.** `capture_audio` roda em `asyncio.to_thread`
+  e fica bloqueado esperando o wake word; sem cuidado, o `asyncio.run` espera
+  essa thread para sempre ao cancelar. Solução: um `threading.Event` de parada
+  (`_stop`). O gerador de blocos do stream consulta o evento a cada 0,2 s
+  (`queue.get(timeout=0.2)`) e termina quando ele é setado; `run_forever` seta
+  o evento em um `finally`, ou seja, ao ser cancelado.
+- `run_once` não transcreve áudio vazio: se `capture_audio` devolver `b""`
+  (falso positivo sem voz), imprime "Nada capturado." e volta a escutar. Sem
+  isso o Whisper receberia um array vazio.
 - O tratamento de timeout/erro HTTP do Cérebro já está dentro de `run_once`,
   então o loop sobrevive a um Cérebro fora do ar.
 - `transcribe()` hoje recarrega o `WhisperModel` a cada chamada; num loop isso
@@ -187,7 +196,8 @@ se ajustam no dispositivo.
 (buffer de features do wake word, LSTM do VAD) e vivem o processo inteiro. No
 início de cada `capture_audio`, chamar `model.reset()` e `vad.reset_states()`
 (ambos existem e rodaram no teste), para que áudio de uma fala anterior não
-contamine a próxima. Também se chama `vad.reset_states()` ao entrar em GRAVANDO.
+contamine a próxima. Não é preciso resetar de novo ao entrar em GRAVANDO: o VAD
+só é chamado nesse estado, então o estado dele continua zerado até lá.
 
 ## Licença
 
