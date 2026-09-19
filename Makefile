@@ -49,6 +49,7 @@ format:
 
 lint:
 	$(VENV_BIN)/ruff check .
+	$(VENV_BIN)/ruff format --check .
 
 typecheck:
 	$(VENV_BIN)/mypy --strict src
